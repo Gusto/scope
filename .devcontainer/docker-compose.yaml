@@ -9,6 +9,7 @@ services:
       - ../:/workspace
       - ~/.claude:/home/vscode/.claude
       - ~/.aws:/home/vscode/.aws
+      - ~/.mise:/home/vscode/.mise
     links:
       - otel-collector
 

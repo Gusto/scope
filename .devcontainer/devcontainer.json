@@ -2,7 +2,7 @@
   "name": "Scope",
   "dockerComposeFile": ["docker-compose.yaml"],
   "service": "devcontainer",
-  "postStartCommand": "claude",
+  "postStartCommand": "mise trust -y && mise install",
   "workspaceFolder": "/workspace",
   "shutdownAction": "stopCompose",
   "customizations": {
@@ -17,9 +17,9 @@
     }
   },
   "features": {
+    "ghcr.io/devcontainers-extra/features/claude-code:1": {},
+    "ghcr.io/devcontainers-extra/features/mise:1": {},
     "ghcr.io/devcontainers/features/aws-cli:1": {},
-    "ghcr.io/devcontainers/features/git:1": {},
-    "ghcr.io/devcontainers/features/rust:1": {},
-    "ghcr.io/devcontainers-extra/features/claude-code:1": {}
+    "ghcr.io/devcontainers/features/git:1": {}
   }
 }
