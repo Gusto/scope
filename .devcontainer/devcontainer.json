@@ -2,11 +2,13 @@
   "name": "Scope",
   "dockerComposeFile": ["docker-compose.yaml"],
   "service": "devcontainer",
-  "postStartCommand": "mise trust -y && mise install",
+  "postStartCommand": "mise trust -y && mise use -g node@24 && mise install",
+  "postAttachCommand": "echo 'eval \"$(mise activate zsh)\"' >> ~/.zshrc && echo 'eval \"$(mise activate bash)\"' >> ~/.bashrc",
   "workspaceFolder": "/workspace",
   "shutdownAction": "stopCompose",
+  "remoteUser": "vscode",
   "customizations": {
-    "cursor": {
+    "vscode": {
       "extensions": [
         "rust-lang.rust-analyzer",
         "vivaxy.vscode-conventional-commits"
@@ -17,7 +19,7 @@
     }
   },
   "features": {
-    "ghcr.io/devcontainers-extra/features/claude-code:1": {},
+    "ghcr.io/stu-bell/devcontainer-features/claude-code:0": {},
     "ghcr.io/devcontainers-extra/features/mise:1": {},
     "ghcr.io/devcontainers/features/aws-cli:1": {},
     "ghcr.io/devcontainers/features/git:1": {}
