@@ -173,5 +173,5 @@ Data model definitions including:
 
 ## See Also
 
-- [Library Usage Guide](../library-usage.md) - How to use dx-scope as a library
+- [Library Usage Guide](./library-usage.md) - How to use dx-scope as a library
 - [API Documentation](https://docs.rs/dx-scope) - Generated API documentation
