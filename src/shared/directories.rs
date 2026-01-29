@@ -25,7 +25,7 @@ use std::path::PathBuf;
 /// # Examples
 ///
 /// ```
-/// # use dev_scope::shared::directories::home;
+/// # use dx_scope::shared::directories::home;
 /// if let Some(home) = home() {
 ///     println!("Home directory: {}", home.display());
 /// }
@@ -47,7 +47,7 @@ pub fn home() -> Option<PathBuf> {
 /// # Examples
 ///
 /// ```
-/// # use dev_scope::shared::directories::config;
+/// # use dx_scope::shared::directories::config;
 /// if let Some(config_dir) = config() {
 ///     println!("Config directory: {}", config_dir.display());
 /// }
@@ -79,7 +79,7 @@ pub fn config() -> Option<PathBuf> {
 /// # Examples
 ///
 /// ```
-/// # use dev_scope::shared::directories::cache;
+/// # use dx_scope::shared::directories::cache;
 /// if let Some(cache_dir) = cache() {
 ///     println!("Cache directory: {}", cache_dir.display());
 /// }

@@ -575,7 +575,16 @@ pub(crate) mod tests {
     use anyhow::Result;
     use chrono::DateTime;
 
-    use crate::prelude::*;
+    use crate::models::prelude::ModelMetadata;
+    use crate::shared::models::prelude::{
+        ReportTemplates, ReportUploadLocation, ReportUploadLocationDestination,
+    };
+    use crate::shared::prelude::{FoundConfig, MockExecutionProvider, OutputCaptureBuilder};
+    use super::{
+        ActionReport, ActionTaskReport, DefaultGroupedReportBuilder,
+        DefaultUnstructuredReportBuilder, GroupReport, GroupedReportBuilder, ReportRenderer,
+        UnstructuredReportBuilder,
+    };
 
     #[tokio::test]
     async fn test_grouped_report_builder() -> Result<()> {
