@@ -1,5 +1,5 @@
 use clap::Parser;
-use dev_scope::prelude::*;
+use dx_scope::prelude::*;
 use human_panic::setup_panic;
 use std::env;
 use std::sync::Arc;
