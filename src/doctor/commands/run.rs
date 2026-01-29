@@ -54,12 +54,14 @@ fn get_cache(args: &DoctorRunArgs) -> Arc<dyn FileCache> {
         let old_default_cache_path = PathBuf::from("/tmp/scope/cache-file.json");
 
         // Handle backward compatibility: migrate from old location to new location
-        if cache_dir != "/tmp/scope"
+        let should_migrate = cache_dir != "/tmp/scope"
             && old_default_cache_path.exists()
-            && !cache_path.exists()
-            && let Err(e) = migrate_old_cache(&old_default_cache_path, &cache_path)
-        {
-            warn!("Unable to migrate cache from old location: {:?}", e);
+            && !cache_path.exists();
+        
+        if should_migrate {
+            if let Err(e) = migrate_old_cache(&old_default_cache_path, &cache_path) {
+                warn!("Unable to migrate cache from old location: {:?}", e);
+            }
         }
 
         match FileBasedCache::new(&cache_path) {
