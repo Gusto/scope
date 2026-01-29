@@ -1,4 +1,5 @@
 use super::error::AnalyzeError;
+use crate::cli::InquireInteraction;
 use crate::prelude::{
     CaptureError, CaptureOpts, DefaultExecutionProvider, ExecutionProvider, OutputDestination,
 };
@@ -50,12 +51,14 @@ pub async fn analyze_root(found_config: &FoundConfig, args: &AnalyzeArgs) -> Res
 }
 
 async fn analyze_logs(found_config: &FoundConfig, args: &AnalyzeLogsArgs) -> Result<i32> {
+    let interaction = InquireInteraction;
     let result = match args.location.as_str() {
         "-" => {
             analyze::process_lines(
                 &found_config.known_error,
                 &found_config.working_dir,
                 read_from_stdin().await?,
+                &interaction,
             )
             .await?
         }
@@ -64,6 +67,7 @@ async fn analyze_logs(found_config: &FoundConfig, args: &AnalyzeLogsArgs) -> Res
                 &found_config.known_error,
                 &found_config.working_dir,
                 read_from_file(file_path).await?,
+                &interaction,
             )
             .await?
         }
@@ -75,6 +79,7 @@ async fn analyze_logs(found_config: &FoundConfig, args: &AnalyzeLogsArgs) -> Res
 
 async fn analyze_command(found_config: &FoundConfig, args: &AnalyzeCommandArgs) -> Result<i32> {
     let exec_runner = DefaultExecutionProvider::default();
+    let interaction = InquireInteraction;
 
     let command = args.command.clone();
     let path = env::var("PATH").unwrap_or_default();
@@ -91,6 +96,7 @@ async fn analyze_command(found_config: &FoundConfig, args: &AnalyzeCommandArgs) 
         &found_config.known_error,
         &found_config.working_dir,
         read_from_command(&exec_runner, capture_opts).await?,
+        &interaction,
     )
     .await?;
 
