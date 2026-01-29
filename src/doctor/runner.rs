@@ -2,12 +2,11 @@ use super::check::{ActionRunResult, ActionRunStatus, DoctorActionRun};
 use crate::doctor::check::RuntimeError;
 use crate::internal::prompts::UserInteraction;
 use crate::models::HelpMetadata;
-use crate::prelude::{
-    ActionReport, ActionTaskReport, CaptureOpts, ExecutionProvider, GroupReport, OutputDestination,
-    SkipSpec, generate_env_vars, progress_bar_without_pos,
+use crate::models::prelude::SkipSpec;
+use crate::shared::prelude::{
+    ActionReport, ActionTaskReport, CaptureOpts, DoctorGroup, ExecutionProvider, GroupReport,
+    OutputDestination, generate_env_vars, progress_bar_without_pos,
 };
-use crate::report_stdout;
-use crate::shared::prelude::DoctorGroup;
 use anyhow::Result;
 use colored::Colorize;
 use opentelemetry::trace::Status;
@@ -374,9 +373,9 @@ fn prompt_user(prompt_text: &str, maybe_help_text: &Option<String>) -> bool {
 /// This function automatically approves all prompts, used in `yolo` mode
 /// or when running non-interactively.
 fn auto_approve(prompt_text: &str, maybe_help_text: &Option<String>) -> bool {
-    println!("{} Yes (auto-approved)", prompt_text);
+    info!(target: "progress", prompt = %prompt_text, "Auto-approved");
     if let Some(help_text) = maybe_help_text {
-        println!("[{}]", help_text);
+        debug!(target: "progress", help = %help_text, "Auto-approve help text");
     }
     true
 }
@@ -467,10 +466,8 @@ async fn print_pretty_result(
     let task_reports = action_task_reports_for_display(&result.action_report);
     for task in task_reports {
         if let Some(text) = task.output {
-            let line_prefix = format!("{group_name}/{action_name}");
             for line in text.lines() {
-                let output_line = format!("{}:  {}", line_prefix.dimmed(), line);
-                report_stdout!("{}", output_line);
+                error!(target: "user", group = group_name, action = action_name, "{}", line);
             }
         }
     }
@@ -549,7 +546,7 @@ mod tests {
     };
     use crate::doctor::runner::{GroupActionContainer, RunGroups, compute_group_order};
     use crate::doctor::tests::{group_noop, make_root_model_additional};
-    use crate::prelude::{ActionReport, ActionTaskReport, MockExecutionProvider};
+    use crate::shared::prelude::{ActionReport, ActionTaskReport, MockExecutionProvider};
     use anyhow::Result;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;

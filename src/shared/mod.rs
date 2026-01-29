@@ -1,9 +1,9 @@
 use colored::Colorize;
+use std::cmp::max;
+use std::path::Path;
 
 use crate::models::HelpMetadata;
 use crate::report_stdout;
-use std::cmp::max;
-use std::path::Path;
 
 mod capture;
 pub mod config;
@@ -28,7 +28,6 @@ pub mod prelude {
     pub use super::config_load::{ConfigOptions, FoundConfig, build_config_path};
     pub use super::logging::{LoggingOpts, STDERR_WRITER, STDOUT_WRITER, progress_bar_without_pos};
     pub use super::models::prelude::*;
-    pub use super::print_details;
     pub use super::report::{
         ActionReport, ActionReportBuilder, ActionTaskReport, ActionTaskReportBuilder,
         DefaultGroupedReportBuilder, DefaultUnstructuredReportBuilder, GroupReport,
@@ -41,6 +40,9 @@ pub(crate) fn convert_to_string(input: Vec<&str>) -> Vec<String> {
     input.iter().map(|x| x.to_string()).collect()
 }
 
+/// Print details of configuration resources in a formatted table.
+///
+/// This is a CLI utility function that outputs directly to stdout.
 pub async fn print_details<T>(working_dir: &Path, config: &Vec<T>)
 where
     T: HelpMetadata,

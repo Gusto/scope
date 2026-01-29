@@ -105,8 +105,7 @@ pub use lint::commands::lint_root;
 pub use report::prelude::{ReportArgs, report_root};
 
 // Shared utilities (for CLI binaries)
-pub use shared::prelude::print_details;
-pub use shared::{CONFIG_FILE_PATH_ENV, RUN_ID_ENV_VAR};
+pub use shared::{print_details, CONFIG_FILE_PATH_ENV, RUN_ID_ENV_VAR};
 
 /// Prelude module for convenient glob imports.
 ///
