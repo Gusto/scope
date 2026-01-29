@@ -1,0 +1,14 @@
+[package]
+name = "simple-analyze"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "simple-analyze"
+path = "main.rs"
+
+[dependencies]
+dx-scope = { path = "../.." }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
