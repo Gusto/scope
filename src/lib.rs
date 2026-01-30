@@ -25,6 +25,14 @@ pub use internal::prompts::{AutoApprove, DenyAll, UserInteraction};
 // Re-export CLI implementation for interactive applications
 pub use cli::InquireInteraction;
 
+// Re-export analyze types at crate root
+pub use analyze::{AnalyzeInput, AnalyzeOptions};
+pub use shared::analyze::AnalyzeStatus;
+
+// Re-export config types at crate root
+pub use shared::config::ConfigLoadOptions;
+pub use shared::prelude::FoundConfig;
+
 /// Preferred way to output data to users. This macro will write the output to tracing for debugging
 /// and to stdout using the global stdout writer. Because we use the stdout writer, the calls
 /// will all be async.
