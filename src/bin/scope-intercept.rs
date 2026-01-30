@@ -1,5 +1,9 @@
 use clap::Parser;
-use dx_scope::prelude::*;
+use dx_scope::{
+    CaptureOpts, ConfigOptions, DefaultExecutionProvider, DefaultUnstructuredReportBuilder,
+    FoundConfig, HelpMetadata, LoggingOpts, OutputCapture, OutputDestination, ReportRenderer,
+    UnstructuredReportBuilder,
+};
 use human_panic::setup_panic;
 use std::env;
 use std::sync::Arc;

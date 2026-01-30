@@ -34,8 +34,9 @@ fn test_run_check_fix_then_recheck_fails_shows_output() {
         "Check initially failed, fix ran, verification failed, group: \"path-exists\", name: \"file-exists\"",
     ))
         .stdout(predicate::str::contains("file-mod.txt"))
-        .stdout(predicate::str::contains("path-exists/file-exists:  /"))
-        .stdout(predicate::str::contains("path-exists/file-exists:  found file /"))
+        // Output now uses tracing with structured fields: group: "path-exists", action: "file-exists"
+        .stdout(predicate::str::contains("found file /"))
+        .stdout(predicate::str::contains("group: \"path-exists\", action: \"file-exists\""))
         .stdout(predicate::str::contains("Summary: 0 groups succeeded, 1 groups failed"));
 
     helper.clean_work_dir();
