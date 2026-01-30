@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use dx_scope::prelude::*;
 use dx_scope::report_stdout;
+use dx_scope::shared::print_details;
 use human_panic::setup_panic;
 use lazy_static::lazy_static;
 use regex::Regex;
