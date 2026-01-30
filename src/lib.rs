@@ -33,6 +33,9 @@ pub use shared::analyze::AnalyzeStatus;
 pub use shared::config::ConfigLoadOptions;
 pub use shared::prelude::FoundConfig;
 
+// Re-export doctor types at crate root
+pub use doctor::{DoctorRunOptions, PathRunResult};
+
 /// Preferred way to output data to users. This macro will write the output to tracing for debugging
 /// and to stdout using the global stdout writer. Because we use the stdout writer, the calls
 /// will all be async.
