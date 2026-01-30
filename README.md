@@ -22,12 +22,37 @@ Review the [latest release](https://github.com/oscope-dev/scope/releases/latest)
 **Cargo**
 
 ```shell
-cargo install dev-scope
+cargo install dx-scope
 ```
 
 **Manually**
 
 To install manually, download the correct archive for your platform from [github release](https://github.com/oscope-dev/scope/releases/latest), extract it, and place the binaries on the `PATH`.
+
+## Library Usage
+
+`scope` can be used as a Rust library for programmatic access to the analyze and doctor functionality:
+
+```toml
+[dependencies]
+dx-scope = "2026.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+```rust
+use dx_scope::{AnalyzeOptions, AutoApprove, DoctorRunOptions};
+
+// Use AutoApprove for CI/automated environments
+// Use DenyAll for dry-run mode
+let interaction = AutoApprove;
+
+// Configure doctor options programmatically
+let options = DoctorRunOptions::with_fixes();
+```
+
+For detailed library documentation, see:
+- [Library Usage Guide](docs/library-usage.md)
+- [API Documentation](https://docs.rs/dx-scope)
 
 ## Commands
 
