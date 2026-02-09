@@ -6,6 +6,7 @@ use std::{cmp, vec};
 use tokio::io::BufReader;
 use tracing::debug;
 
+use crate::internal::prompts::AutoApprove;
 use crate::models::HelpMetadata;
 use crate::prelude::{
     ActionReport, ActionReportBuilder, ActionTaskReport, DoctorCommand, KnownError,
@@ -672,7 +673,9 @@ impl DefaultDoctorActionRun {
             .collect::<Vec<String>>();
 
         let buffer = BufReader::new(StringVecReader::new(&lines));
-        analyze::process_lines(&self.known_errors, &self.working_dir, buffer).await
+        // Use AutoApprove for self-healing: known errors during doctor runs
+        // are automatically fixed without user prompts
+        analyze::process_lines(&self.known_errors, &self.working_dir, buffer, &AutoApprove).await
     }
 }
 
