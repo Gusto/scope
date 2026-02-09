@@ -1,5 +1,5 @@
 [package]
-name = "dev-scope"
+name = "dx-scope"
 version = "0.0.0-dev"
 edition = "2024"
 default-run = "scope"
