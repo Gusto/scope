@@ -9,7 +9,8 @@ on:
 jobs:
   prepare-release:
     name: Prepare Release
-    runs-on: gusto-ubuntu-default
+    runs-on:
+      group: gusto-ubuntu-default
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -63,7 +64,8 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: prepare-release
-    runs-on: ${{ matrix.runner }}
+    runs-on:
+      group: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -122,7 +124,8 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [prepare-release, build]
-    runs-on: gusto-ubuntu-default
+    runs-on:
+      group: gusto-ubuntu-default
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
