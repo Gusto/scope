@@ -21,12 +21,11 @@ jobs:
       - name: Calculate version
         id: version
         run: |
-          # Use non-padded month/day to produce valid semver (no leading zeros)
+          # Semver requires exactly 3 numeric components with no leading zeros
           YEAR=$(date -u +%Y)
-          MONTH=$(date -u +%-m)
-          DAY=$(date -u +%-d)
-          TIME=$(date -u +%H%M)
-          VERSION="${YEAR}.${MONTH}.${DAY}.${TIME}"
+          MONTH_DAY=$(date -u +%-m%d)
+          TIME=$(date -u +%-H%M)
+          VERSION="${YEAR}.${MONTH_DAY}.${TIME}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Version: ${VERSION}"
 
