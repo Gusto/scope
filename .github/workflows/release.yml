@@ -43,7 +43,7 @@ jobs:
           fi
 
           # Merge main into release (no commit yet)
-          git merge main --no-commit --no-ff
+          git merge origin/main --no-commit --no-ff
 
           # Update version in Cargo.toml
           sed -i 's/^version = "0.0.0-dev"/version = "'"${VERSION}"'"/' Cargo.toml
