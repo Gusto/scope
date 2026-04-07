@@ -43,14 +43,14 @@ jobs:
           fi
 
           # Merge main into release (no commit yet)
-          git merge origin/main --no-commit --no-ff
+          git merge origin/main --no-commit --no-ff || true
 
-          # Update version in Cargo.toml
-          sed -i 's/^version = "0.0.0-dev"/version = "'"${VERSION}"'"/' Cargo.toml
+          # Update version in Cargo.toml (replace any existing version)
+          sed -i 's/^version = ".*"/version = "'"${VERSION}"'"/' Cargo.toml
           grep -q "^version = \"${VERSION}\"" Cargo.toml || { echo "Version update failed"; exit 1; }
 
-          # Commit merge with version bump
-          git add Cargo.toml
+          # Commit release with version bump
+          git add -A
           git commit -m "Release v${VERSION}"
 
           # Create tag
