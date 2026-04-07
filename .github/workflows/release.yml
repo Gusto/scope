@@ -21,7 +21,12 @@ jobs:
       - name: Calculate version
         id: version
         run: |
-          VERSION=$(date -u +%Y.%m.%d.%H%M)
+          # Use non-padded month/day to produce valid semver (no leading zeros)
+          YEAR=$(date -u +%Y)
+          MONTH=$(date -u +%-m)
+          DAY=$(date -u +%-d)
+          TIME=$(date -u +%H%M)
+          VERSION="${YEAR}.${MONTH}.${DAY}.${TIME}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Version: ${VERSION}"
 
