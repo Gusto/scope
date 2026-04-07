@@ -139,7 +139,8 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [push-release, build]
-    runs-on: ubuntu-latest
+    runs-on:
+      group: gusto-ubuntu-default
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
