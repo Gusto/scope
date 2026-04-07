@@ -21,7 +21,12 @@ jobs:
       - name: Calculate version
         id: version
         run: |
-          # CalVer: YEAR.MONTH.DAY+HHMM (build metadata for uniqueness)
+          # CalVer: YEAR.MONTH.DAY+HHMM — e.g., 2026.4.7+1823
+          # The +HHMM build metadata ensures uniqueness for multiple same-day
+          # releases. Per semver, build metadata is ignored for version
+          # comparison (2026.4.7+0900 == 2026.4.7+1400), but that's fine
+          # since this package isn't published to crates.io — the version
+          # only appears in the compiled binary and git tags.
           VERSION="$(date -u +%-Y.%-m.%-d+%H%M)"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Version: ${VERSION}"
