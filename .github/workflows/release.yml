@@ -21,11 +21,8 @@ jobs:
       - name: Calculate version
         id: version
         run: |
-          # Semver requires exactly 3 numeric components with no leading zeros
-          YEAR=$(date -u +%Y)
-          MONTH_DAY=$(date -u +%-m%d)
-          TIME=$(date -u +%-H%M)
-          VERSION="${YEAR}.${MONTH_DAY}.${TIME}"
+          # CalVer: YEAR.MONTH.DAY+HHMM (build metadata for uniqueness)
+          VERSION="$(date -u +%-Y.%-m.%-d+%H%M)"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Version: ${VERSION}"
 
