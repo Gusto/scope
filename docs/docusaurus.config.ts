@@ -8,14 +8,14 @@ const config: Config = {
   // favicon: 'img/favicon.ico',
 
   // Set the production url of your site here
-  url: 'https://oscope-dev.github.io/',
+  url: 'https://Gusto.github.io/',
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
   baseUrl: '/scope',
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
-  organizationName: 'oscope-dev', // Usually your GitHub org/user name.
+  organizationName: 'Gusto', // Usually your GitHub org/user name.
   projectName: 'scope', // Usually your repo name.
 
   onBrokenLinks: 'throw',
@@ -41,7 +41,7 @@ const config: Config = {
           // Please change this to your repo.
           // Remove this to remove the "edit this page" links.
           editUrl:
-            'https://github.com/oscope-dev/scope/tree/main/docs/',
+            'https://github.com/Gusto/scope/tree/main/docs/',
         },
         theme: {
           customCss: './src/css/custom.css',
@@ -72,7 +72,7 @@ const config: Config = {
           label: 'Docs',
         },
         {
-          href: 'https://github.com/oscope-dev/scope',
+          href: 'https://github.com/Gusto/scope',
           label: 'GitHub',
           position: 'right',
         },
@@ -95,7 +95,7 @@ const config: Config = {
           items: [
             {
               label: 'GitHub',
-              href: 'https://github.com/oscope-dev/scope',
+              href: 'https://github.com/Gusto/scope',
             },
           ],
         },
