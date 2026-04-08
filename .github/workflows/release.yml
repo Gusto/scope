@@ -161,3 +161,8 @@ jobs:
             --title "v${VERSION}" \
             --notes "" \
             artifacts/*.tar.gz
+
+  pages:
+    name: Deploy Github Pages
+    needs: release
+    uses: ./.github/workflows/gh-page.yml
