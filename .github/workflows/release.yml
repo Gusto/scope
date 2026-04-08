@@ -9,9 +9,35 @@ on:
 jobs:
   prepare-release:
     name: Prepare Release
-    runs-on: gusto-ubuntu-default
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate version
+        id: version
+        run: |
+          # CalVer: YEAR.MONTH.DAY+HHMM — e.g., 2026.4.7+1823
+          # The +HHMM build metadata ensures uniqueness for multiple same-day
+          # releases. Per semver, build metadata is ignored for version
+          # comparison (2026.4.7+0900 == 2026.4.7+1400), but that's fine
+          # since this package isn't published to crates.io — the version
+          # only appears in the compiled binary and git tags.
+          VERSION="$(date -u +%-Y.%-m.%-d+%H%M)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Version: ${VERSION}"
+
+  push-release:
+    name: Push Release Branch and Tag
+    needs: prepare-release
+    runs-on:
+      group: gusto-ubuntu-default
+    outputs:
+      version: ${{ needs.prepare-release.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -23,17 +49,10 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
 
-      - name: Calculate version
-        id: version
-        run: |
-          VERSION=$(date -u +%Y.%m.%d.%H%M)
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Version: ${VERSION}"
-
       - name: Merge to release branch and tag
         run: |
           set -euo pipefail
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ needs.prepare-release.outputs.version }}"
 
           # Checkout or create release branch
           if git fetch origin release:release 2>/dev/null; then
@@ -43,14 +62,14 @@ jobs:
           fi
 
           # Merge main into release (no commit yet)
-          git merge main --no-commit --no-ff
+          git merge origin/main --no-commit --no-ff || true
 
-          # Update version in Cargo.toml
-          sed -i 's/^version = "0.0.0-dev"/version = "'"${VERSION}"'"/' Cargo.toml
+          # Update version in Cargo.toml (replace any existing version)
+          sed -i 's/^version = ".*"/version = "'"${VERSION}"'"/' Cargo.toml
           grep -q "^version = \"${VERSION}\"" Cargo.toml || { echo "Version update failed"; exit 1; }
 
-          # Commit merge with version bump
-          git add Cargo.toml
+          # Commit release with version bump
+          git add -A
           git commit -m "Release v${VERSION}"
 
           # Create tag
@@ -62,23 +81,23 @@ jobs:
 
   build:
     name: Build ${{ matrix.target }}
-    needs: prepare-release
+    needs: push-release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: gusto-osx-default
+            runner: macos-latest
             use-cross: false
           - target: x86_64-unknown-linux-gnu
-            runner: gusto-ubuntu-default
+            runner: ubuntu-latest
             use-cross: true
           - target: x86_64-unknown-linux-musl
-            runner: gusto-ubuntu-default
+            runner: ubuntu-latest
             use-cross: true
           - target: aarch64-unknown-linux-gnu
-            runner: gusto-ubuntu-default
+            runner: ubuntu-latest
             use-cross: true
     steps:
       - name: Checkout release branch
@@ -121,8 +140,9 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [prepare-release, build]
-    runs-on: gusto-ubuntu-default
+    needs: [push-release, build]
+    runs-on:
+      group: gusto-ubuntu-default
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -136,7 +156,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          VERSION="${{ needs.prepare-release.outputs.version }}"
+          VERSION="${{ needs.push-release.outputs.version }}"
           gh release create "v${VERSION}" \
             --title "v${VERSION}" \
             --notes "" \
