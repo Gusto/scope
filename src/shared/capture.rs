@@ -49,18 +49,17 @@ pub struct OutputCapture {
 }
 
 #[derive(Clone, Debug)]
-pub enum OutputDestination {
-    StandardOut,
-    StandardOutWithPrefix(String),
-    Logging,
-    Null,
+pub enum OutputDisplay {
+    Visible,
+    VisibleWithPrefix(String),
+    Silent,
 }
 
 struct StreamCapture<R: io::AsyncRead + Unpin> {
     reader: R,
     writer: Arc<RwLock<Box<dyn std::io::Write + Send + Sync>>>,
     level: Level,
-    dest: OutputDestination,
+    dest: OutputDisplay,
 }
 
 impl<R: io::AsyncRead + Unpin> StreamCapture<R> {
@@ -70,15 +69,19 @@ impl<R: io::AsyncRead + Unpin> StreamCapture<R> {
         let mut reader = BufReader::new(self.reader).lines();
         while let Some(line) = reader.next_line().await? {
             captured.add_line(&line).await;
+
+            // Always trace — telemetry is not optional
+            match self.level {
+                Level::ERROR => error!("{}", line),
+                _ => info!("{}", line),
+            }
+
+            // Optionally display to user
             match &self.dest {
-                OutputDestination::Logging => match self.level {
-                    Level::ERROR => error!("{}", line),
-                    _ => info!("{}", line),
-                },
-                OutputDestination::StandardOut => {
+                OutputDisplay::Visible => {
                     writeln!(self.writer.write().await, "{line}\r").ok();
                 }
-                OutputDestination::StandardOutWithPrefix(prefix) => {
+                OutputDisplay::VisibleWithPrefix(prefix) => {
                     writeln!(
                         self.writer.write().await,
                         "{}:  {}\r",
@@ -87,7 +90,7 @@ impl<R: io::AsyncRead + Unpin> StreamCapture<R> {
                     )
                     .ok();
                 }
-                OutputDestination::Null => {}
+                OutputDisplay::Silent => {}
             };
         }
 
@@ -122,7 +125,7 @@ pub trait ExecutionProvider: Send + Sync {
             .run_command(CaptureOpts {
                 working_dir: workdir,
                 args: &args,
-                output_dest: OutputDestination::Null,
+                output_dest: OutputDisplay::Silent,
                 path,
                 env_vars: Default::default(),
             })
@@ -150,7 +153,7 @@ pub struct CaptureOpts<'a> {
     pub env_vars: BTreeMap<String, String>,
     pub path: &'a str,
     pub args: &'a [String],
-    pub output_dest: OutputDestination,
+    pub output_dest: OutputDisplay,
 }
 
 impl<'a> CaptureOpts<'a> {

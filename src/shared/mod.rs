@@ -21,7 +21,7 @@ pub const RUN_ID_ENV_VAR: &str = "SCOPE_RUN_ID";
 pub mod prelude {
     pub use super::capture::{
         CaptureError, CaptureOpts, DefaultExecutionProvider, ExecutionProvider,
-        MockExecutionProvider, OutputCapture, OutputCaptureBuilder, OutputDestination,
+        MockExecutionProvider, OutputCapture, OutputCaptureBuilder, OutputDisplay,
     };
     pub use super::config_load::{ConfigOptions, FoundConfig, build_config_path};
     pub use super::logging::{LoggingOpts, STDERR_WRITER, STDOUT_WRITER, progress_bar_without_pos};

@@ -1,6 +1,6 @@
 use super::error::AnalyzeError;
 use crate::prelude::{
-    CaptureError, CaptureOpts, DefaultExecutionProvider, ExecutionProvider, OutputDestination,
+    CaptureError, CaptureOpts, DefaultExecutionProvider, ExecutionProvider, OutputDisplay,
 };
 use crate::shared::analyze;
 use crate::shared::prelude::FoundConfig;
@@ -84,7 +84,7 @@ async fn analyze_command(found_config: &FoundConfig, args: &AnalyzeCommandArgs) 
         env_vars: Default::default(),
         path: &path,
         args: &command,
-        output_dest: OutputDestination::StandardOutWithPrefix("analyzing".to_string()),
+        output_dest: OutputDisplay::VisibleWithPrefix("analyzing".to_string()),
     };
 
     let result = analyze::process_lines(

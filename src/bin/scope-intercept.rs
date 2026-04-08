@@ -70,7 +70,7 @@ async fn run_command(opts: Cli) -> anyhow::Result<i32> {
     let capture = OutputCapture::capture_output(CaptureOpts {
         working_dir: &current_dir,
         args: &command,
-        output_dest: OutputDestination::StandardOut,
+        output_dest: OutputDisplay::Visible,
         path: &path,
         env_vars: Default::default(),
     })
