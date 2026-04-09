@@ -1,7 +1,7 @@
 use crate::models::HelpMetadata;
 use crate::prelude::{
     CaptureOpts, DefaultExecutionProvider, DoctorFix, ExecutionProvider, KnownError, OutputCapture,
-    OutputDestination, generate_env_vars,
+    OutputDisplay, generate_env_vars,
 };
 use anyhow::Result;
 use inquire::InquireError;
@@ -142,7 +142,7 @@ async fn run_fix(
         let capture_opts = CaptureOpts {
             working_dir,
             args: &[cmd.text().to_string()],
-            output_dest: OutputDestination::StandardOutWithPrefix("fixing".to_string()),
+            output_dest: OutputDisplay::VisibleWithPrefix("fixing".to_string()),
             path: exec_path,
             env_vars: generate_env_vars(),
         };

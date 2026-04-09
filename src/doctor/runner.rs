@@ -2,10 +2,9 @@ use super::check::{ActionRunResult, ActionRunStatus, DoctorActionRun};
 use crate::doctor::check::RuntimeError;
 use crate::models::HelpMetadata;
 use crate::prelude::{
-    ActionReport, ActionTaskReport, CaptureOpts, ExecutionProvider, GroupReport, OutputDestination,
+    ActionReport, ActionTaskReport, CaptureOpts, ExecutionProvider, GroupReport, OutputDisplay,
     SkipSpec, generate_env_vars, progress_bar_without_pos,
 };
-use crate::report_stdout;
 use crate::shared::prelude::DoctorGroup;
 use anyhow::Result;
 use colored::Colorize;
@@ -161,7 +160,7 @@ where
                     .run_command(CaptureOpts {
                         working_dir: &self.exec_working_dir,
                         args: &args,
-                        output_dest: OutputDestination::Logging,
+                        output_dest: OutputDisplay::Silent,
                         path: &path,
                         env_vars: generate_env_vars(),
                     })
@@ -447,8 +446,14 @@ async fn print_pretty_result(
         if let Some(text) = task.output {
             let line_prefix = format!("{group_name}/{action_name}");
             for line in text.lines() {
-                let output_line = format!("{}:  {}", line_prefix.dimmed(), line);
-                report_stdout!("{}", output_line);
+                // Only write to stdout — tracing already happened during capture
+                writeln!(
+                    crate::prelude::STDOUT_WRITER.write().await,
+                    "{}:  {}\r",
+                    line_prefix.dimmed(),
+                    line
+                )
+                .ok();
             }
         }
     }
@@ -456,14 +461,16 @@ async fn print_pretty_result(
     Ok(())
 }
 
-/// Returns the action task reports for display based on the presumed action report status.
+/// Returns the most relevant action task reports for display.
+/// Priority: validate > fix > check — shows the latest phase that ran,
+/// which is the most useful output when diagnosing failures.
 fn action_task_reports_for_display(action_report: &ActionReport) -> Vec<ActionTaskReport> {
-    if !action_report.check.is_empty() {
-        action_report.check.clone()
+    if !action_report.validate.is_empty() {
+        action_report.validate.clone()
     } else if !action_report.fix.is_empty() {
         action_report.fix.clone()
     } else {
-        action_report.validate.clone()
+        action_report.check.clone()
     }
 }
 
@@ -943,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn test_action_task_reports_for_display_when_check_nonempty() {
+    fn test_action_task_reports_for_display_prefers_validate_over_all() {
         let action_report = ActionReport {
             action_name: "test".to_string(),
             check: vec![ActionTaskReport {
@@ -962,22 +969,22 @@ mod tests {
 
         let task_reports = action_task_reports_for_display(&action_report);
         let actual = task_reports.first().unwrap();
-        assert_eq!(actual.output, Some("check output".to_string()));
+        assert_eq!(actual.output, Some("validate output".to_string()));
     }
 
     #[test]
-    fn test_action_task_reports_for_display_when_fix_nonempty() {
+    fn test_action_task_reports_for_display_prefers_fix_over_check() {
         let action_report = ActionReport {
             action_name: "test".to_string(),
-            check: vec![],
+            check: vec![ActionTaskReport {
+                output: Some("check output".to_string()),
+                ..Default::default()
+            }],
             fix: vec![ActionTaskReport {
                 output: Some("fix output".to_string()),
                 ..Default::default()
             }],
-            validate: vec![ActionTaskReport {
-                output: Some("validate output".to_string()),
-                ..Default::default()
-            }],
+            validate: vec![],
         };
 
         let task_reports = action_task_reports_for_display(&action_report);
