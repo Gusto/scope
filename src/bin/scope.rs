@@ -129,7 +129,7 @@ async fn exec_sub_command(found_config: &FoundConfig, args: &[String]) -> Result
     let capture = OutputCapture::capture_output(CaptureOpts {
         working_dir: &found_config.working_dir,
         args: &args,
-        output_dest: OutputDestination::StandardOut,
+        output_dest: OutputDisplay::Visible,
         path: &found_config.bin_path,
         env_vars: BTreeMap::from([
             (

@@ -14,7 +14,7 @@ use crate::prelude::{
 use crate::shared::analyze::{self, AnalyzeStatus};
 use crate::shared::prelude::{
     CaptureError, CaptureOpts, DoctorCommands, DoctorGroup, DoctorGroupAction,
-    DoctorGroupCachePath, ExecutionProvider, OutputDestination,
+    DoctorGroupCachePath, ExecutionProvider, OutputDisplay,
 };
 use async_trait::async_trait;
 use derive_builder::Builder;
@@ -511,7 +511,7 @@ impl DefaultDoctorActionRun {
             .run_command(CaptureOpts {
                 working_dir: &self.working_dir,
                 args: &args,
-                output_dest: OutputDestination::StandardOutWithPrefix(format!(
+                output_dest: OutputDisplay::VisibleWithPrefix(format!(
                     "{}/{}",
                     self.model.metadata.name(),
                     self.action.name
@@ -625,7 +625,7 @@ impl DefaultDoctorActionRun {
                 .run_command(CaptureOpts {
                     working_dir: &self.working_dir,
                     args: &args,
-                    output_dest: OutputDestination::Logging,
+                    output_dest: OutputDisplay::Silent,
                     path: &path,
                     env_vars: generate_env_vars(),
                 })
