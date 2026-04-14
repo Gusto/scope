@@ -16,7 +16,9 @@ fn test_intercept_fix_succeeds_retry_succeeds() {
     helper
         .intercept_command(&["--yolo", "cat", "status.txt"])
         .success()
-        .stdout(predicate::str::contains("Known error 'missing-status-file' found"))
+        .stdout(predicate::str::contains(
+            "Known error 'missing-status-file' found",
+        ))
         .stdout(predicate::str::contains("Fix succeeded, retrying command"))
         .stdout(predicate::str::contains("ready"));
 
@@ -34,9 +36,7 @@ fn test_intercept_fix_succeeds_retry_succeeds_via_script() {
     helper
         .work_dir
         .child("setup.sh")
-        .write_str(
-            "#!/bin/bash\nset -e\necho 'Running setup...'\ncat status.txt\necho 'Done!'\n",
-        )
+        .write_str("#!/bin/bash\nset -e\necho 'Running setup...'\ncat status.txt\necho 'Done!'\n")
         .unwrap();
 
     helper
@@ -67,7 +67,9 @@ fn test_intercept_fix_succeeds_retry_fails() {
     helper
         .intercept_command(&["--yolo", "bash", "check.sh"])
         .failure()
-        .stdout(predicate::str::contains("Known error 'missing-status-file' found"))
+        .stdout(predicate::str::contains(
+            "Known error 'missing-status-file' found",
+        ))
         .stdout(predicate::str::contains("Fix succeeded, retrying command"))
         .stdout(predicate::str::contains("ready"));
 
@@ -82,14 +84,11 @@ fn test_intercept_known_error_no_fix() {
     );
 
     helper
-        .intercept_command(&[
-            "--",
-            "bash",
-            "-c",
-            "echo 'something went wrong'; exit 1",
-        ])
+        .intercept_command(&["--", "bash", "-c", "echo 'something went wrong'; exit 1"])
         .failure()
-        .stdout(predicate::str::contains("Known error 'something-broke' found"))
+        .stdout(predicate::str::contains(
+            "Known error 'something-broke' found",
+        ))
         .stdout(predicate::str::contains(
             "This is a known issue. Check the wiki for manual steps.",
         ))
@@ -111,7 +110,9 @@ fn test_intercept_no_tty_skips_fix() {
     helper
         .intercept_command(&["cat", "status.txt"])
         .failure()
-        .stdout(predicate::str::contains("Known error 'missing-status-file' found"))
+        .stdout(predicate::str::contains(
+            "Known error 'missing-status-file' found",
+        ))
         .stdout(predicate::str::contains("User denied fix"))
         .stdout(predicate::str::contains("Fix succeeded").not());
 
@@ -125,7 +126,11 @@ fn test_intercept_succeeds_first_try() {
         "intercept-known-error-with-fix",
     );
 
-    helper.work_dir.child("status.txt").write_str("ready\n").unwrap();
+    helper
+        .work_dir
+        .child("status.txt")
+        .write_str("ready\n")
+        .unwrap();
 
     helper
         .intercept_command(&["cat", "status.txt"])

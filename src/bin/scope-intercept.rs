@@ -109,26 +109,27 @@ async fn run_command(opts: Cli) -> anyhow::Result<i32> {
 
     analyze::report_result(&analyze_status);
 
-    let (capture, exit_code) = if matches!(analyze_status, AnalyzeStatus::KnownErrorFoundFixSucceeded) {
-        info!(target: "always", "Fix succeeded, retrying command");
-        let retry_capture = OutputCapture::capture_output(CaptureOpts {
-            working_dir: &current_dir,
-            args: &command,
-            output_dest: OutputDisplay::Visible,
-            path: &path,
-            env_vars: Default::default(),
-        })
-        .await?;
+    let (capture, exit_code) =
+        if matches!(analyze_status, AnalyzeStatus::KnownErrorFoundFixSucceeded) {
+            info!(target: "always", "Fix succeeded, retrying command");
+            let retry_capture = OutputCapture::capture_output(CaptureOpts {
+                working_dir: &current_dir,
+                args: &command,
+                output_dest: OutputDisplay::Visible,
+                path: &path,
+                env_vars: Default::default(),
+            })
+            .await?;
 
-        let retry_exit_code = retry_capture.exit_code.unwrap_or(-1);
-        if accepted_exit_codes.contains(&retry_exit_code) {
-            return Ok(retry_exit_code);
-        }
+            let retry_exit_code = retry_capture.exit_code.unwrap_or(-1);
+            if accepted_exit_codes.contains(&retry_exit_code) {
+                return Ok(retry_exit_code);
+            }
 
-        (retry_capture, retry_exit_code)
-    } else {
-        (capture, exit_code)
-    };
+            (retry_capture, retry_exit_code)
+        } else {
+            (capture, exit_code)
+        };
 
     if !found_config.report_upload.is_empty() {
         offer_bug_report(&found_config, &command, &capture).await?;
