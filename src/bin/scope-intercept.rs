@@ -29,6 +29,10 @@ struct Cli {
     #[clap(flatten)]
     config_options: ConfigOptions,
 
+    /// Automatically approve all fix prompts without asking
+    #[arg(long, short = 'y', default_value = "false")]
+    yolo: bool,
+
     /// Command to execute withing scope-intercept.
     #[arg(required = true)]
     utility: String,
@@ -66,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_command(opts: Cli) -> anyhow::Result<i32> {
+    let yolo = opts.yolo;
     let mut command = vec![opts.utility];
     command.extend(opts.args);
     let current_dir = std::env::current_dir()?;
@@ -98,6 +103,7 @@ async fn run_command(opts: Cli) -> anyhow::Result<i32> {
         &found_config.known_error,
         &found_config.working_dir,
         BufReader::new(Cursor::new(capture.generate_user_output())),
+        yolo,
     )
     .await?;
 

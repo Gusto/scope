@@ -165,6 +165,7 @@ pub struct DefaultDoctorActionRun {
     pub working_dir: PathBuf,
     pub file_cache: Arc<dyn FileCache>,
     pub run_fix: bool,
+    pub yolo: bool,
     #[educe(Debug(ignore))]
     pub exec_runner: Arc<dyn ExecutionProvider>,
     #[educe(Debug(ignore))]
@@ -672,7 +673,7 @@ impl DefaultDoctorActionRun {
             .collect::<Vec<String>>();
 
         let buffer = BufReader::new(StringVecReader::new(&lines));
-        analyze::process_lines(&self.known_errors, &self.working_dir, buffer).await
+        analyze::process_lines(&self.known_errors, &self.working_dir, buffer, self.yolo).await
     }
 }
 
@@ -920,6 +921,7 @@ pub(crate) mod tests {
             working_dir: path,
             file_cache,
             run_fix: true,
+            yolo: false,
             exec_runner: Arc::new(exec_runner),
             glob_walker: Arc::new(glob_walker),
             known_errors: BTreeMap::new(),
@@ -1564,6 +1566,134 @@ pub(crate) mod tests {
 
             let actual = make_absolute(base_dir.as_path(), &glob);
             assert_eq!(home_dir.join("foo.txt").display().to_string(), actual);
+        }
+    }
+
+    mod analyze_known_errors_spec {
+        use super::*;
+        use crate::models::prelude::{ModelMetadata, ModelMetadataAnnotations};
+        use crate::shared::analyze::AnalyzeStatus;
+        use regex::Regex;
+
+        fn make_known_error(pattern: &str, with_fix: bool) -> KnownError {
+            let fix = if with_fix {
+                Some(DoctorFix {
+                    command: Some(DoctorCommands::from(vec!["true"])),
+                    help_text: None,
+                    help_url: None,
+                    prompt: None,
+                })
+            } else {
+                None
+            };
+
+            KnownError {
+                full_name: "ScopeKnownError/test-error".to_string(),
+                metadata: ModelMetadata {
+                    name: "test-error".to_string(),
+                    description: "a test known error".to_string(),
+                    annotations: ModelMetadataAnnotations {
+                        file_path: None,
+                        file_dir: None,
+                        working_dir: Some("/tmp".to_string()),
+                        bin_path: None,
+                        extra: BTreeMap::new(),
+                    },
+                    labels: BTreeMap::new(),
+                },
+                pattern: pattern.to_string(),
+                regex: Regex::new(pattern).unwrap(),
+                help_text: "test help".to_string(),
+                fix,
+            }
+        }
+
+        fn task_report(output: &str) -> ActionTaskReport {
+            ActionTaskReportBuilder::default()
+                .output(Some(output.to_string()))
+                .exit_code(Some(1))
+                .command("test".to_string())
+                .build()
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn yolo_auto_approves_known_error_fix() -> Result<()> {
+            let action = build_run_fail_fix_succeed_action();
+            let exec_runner = MockExecutionProvider::new();
+            let glob_walker = MockGlobWalker::new();
+            let mut run = setup_test(vec![action], exec_runner, glob_walker);
+
+            run.working_dir = PathBuf::from("/tmp");
+            run.yolo = true;
+            run.known_errors.insert(
+                "ScopeKnownError/test-error".to_string(),
+                make_known_error("error-pattern", true),
+            );
+
+            let report = task_report("error-pattern found in output");
+            let status = run.analyze_known_errors(&[report]).await?;
+
+            assert!(matches!(status, AnalyzeStatus::KnownErrorFoundFixSucceeded));
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn no_tty_without_yolo_returns_user_denied() -> Result<()> {
+            let action = build_run_fail_fix_succeed_action();
+            let exec_runner = MockExecutionProvider::new();
+            let glob_walker = MockGlobWalker::new();
+            let mut run = setup_test(vec![action], exec_runner, glob_walker);
+
+            run.yolo = false;
+            run.known_errors.insert(
+                "ScopeKnownError/test-error".to_string(),
+                make_known_error("error-pattern", true),
+            );
+
+            let report = task_report("error-pattern found in output");
+            let status = run.analyze_known_errors(&[report]).await?;
+
+            assert!(matches!(status, AnalyzeStatus::KnownErrorFoundUserDenied));
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn no_pattern_match_returns_no_known_errors() -> Result<()> {
+            let action = build_run_fail_fix_succeed_action();
+            let exec_runner = MockExecutionProvider::new();
+            let glob_walker = MockGlobWalker::new();
+            let mut run = setup_test(vec![action], exec_runner, glob_walker);
+
+            run.known_errors.insert(
+                "ScopeKnownError/test-error".to_string(),
+                make_known_error("error-pattern", true),
+            );
+
+            let report = task_report("totally unrelated output");
+            let status = run.analyze_known_errors(&[report]).await?;
+
+            assert!(matches!(status, AnalyzeStatus::NoKnownErrorsFound));
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn pattern_match_without_fix_returns_no_fix_found() -> Result<()> {
+            let action = build_run_fail_fix_succeed_action();
+            let exec_runner = MockExecutionProvider::new();
+            let glob_walker = MockGlobWalker::new();
+            let mut run = setup_test(vec![action], exec_runner, glob_walker);
+
+            run.known_errors.insert(
+                "ScopeKnownError/test-error".to_string(),
+                make_known_error("error-pattern", false),
+            );
+
+            let report = task_report("error-pattern found in output");
+            let status = run.analyze_known_errors(&[report]).await?;
+
+            assert!(matches!(status, AnalyzeStatus::KnownErrorFoundNoFixFound));
+            Ok(())
         }
     }
 }
