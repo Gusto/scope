@@ -42,6 +42,8 @@ struct AnalyzeCommandArgs {
     command: Vec<String>,
 }
 
+// `scope analyze` is interactive by design — users review and approve each fix,
+// so auto-approving (yolo) isn't implemented here.
 pub async fn analyze_root(found_config: &FoundConfig, args: &AnalyzeArgs) -> Result<i32> {
     match &args.command {
         AnalyzeCommands::Logs(args) => analyze_logs(found_config, args).await,
@@ -56,6 +58,7 @@ async fn analyze_logs(found_config: &FoundConfig, args: &AnalyzeLogsArgs) -> Res
                 &found_config.known_error,
                 &found_config.working_dir,
                 read_from_stdin().await?,
+                false,
             )
             .await?
         }
@@ -64,6 +67,7 @@ async fn analyze_logs(found_config: &FoundConfig, args: &AnalyzeLogsArgs) -> Res
                 &found_config.known_error,
                 &found_config.working_dir,
                 read_from_file(file_path).await?,
+                false,
             )
             .await?
         }
@@ -91,6 +95,7 @@ async fn analyze_command(found_config: &FoundConfig, args: &AnalyzeCommandArgs) 
         &found_config.known_error,
         &found_config.working_dir,
         read_from_command(&exec_runner, capture_opts).await?,
+        false,
     )
     .await?;
 

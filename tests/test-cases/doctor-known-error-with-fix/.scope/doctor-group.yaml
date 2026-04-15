@@ -1,0 +1,14 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: known-error-test
+spec:
+  actions:
+    - name: needs-file
+      check:
+        commands:
+          - test -f status.txt
+      fix:
+        commands:
+          - echo fix-failed-status-missing
+          - test -f status.txt

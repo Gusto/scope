@@ -72,6 +72,22 @@ impl<'a> ScopeTestHelper<'a> {
         self.run_command(&run_command)
     }
 
+    pub fn intercept_command(&self, args: &[&str]) -> Assert {
+        let mut cmd = Command::cargo_bin("scope-intercept").unwrap();
+        cmd.current_dir(self.work_dir.path())
+            .env(
+                "SCOPE_RUN_ID",
+                format!(
+                    "{}-{}",
+                    self.name,
+                    self.counter.fetch_add(1, Ordering::Relaxed)
+                ),
+            )
+            .env("NO_COLOR", "1")
+            .args(args)
+            .assert()
+    }
+
     pub fn clean_work_dir(self) {
         self.work_dir.close().unwrap();
     }

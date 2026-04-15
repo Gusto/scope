@@ -199,6 +199,7 @@ fn transform_inputs(found_config: &FoundConfig, args: &DoctorRunArgs) -> RunTran
                 working_dir: found_config.working_dir.clone(),
                 file_cache: file_cache.clone(),
                 run_fix: args.fix.unwrap_or(true),
+                yolo: args.yolo,
                 exec_runner: exec_runner.clone(),
                 glob_walker: glob_walker.clone(),
                 known_errors: found_config.known_error.clone(),
