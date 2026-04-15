@@ -17,6 +17,7 @@ pub async fn process_lines<T>(
     known_errors: &BTreeMap<String, KnownError>,
     working_dir: &PathBuf,
     input: T,
+    yolo: bool,
 ) -> Result<AnalyzeStatus>
 where
     T: AsyncRead,
@@ -43,7 +44,7 @@ where
 
                         tracing_indicatif::suspend_tracing_indicatif(|| {
                             let exec_path = ke.metadata.exec_path();
-                            prompt_and_run_fix(working_dir, exec_path, fix)
+                            prompt_and_run_fix(working_dir, exec_path, fix, yolo)
                         })
                         .await?
                     }
@@ -73,6 +74,7 @@ async fn prompt_and_run_fix(
     working_dir: &PathBuf,
     exec_path: String,
     fix: &DoctorFix,
+    yolo: bool,
 ) -> Result<AnalyzeStatus> {
     let fix_prompt = &fix.prompt.as_ref();
     let prompt_text = fix_prompt
@@ -80,51 +82,59 @@ async fn prompt_and_run_fix(
         .unwrap_or("Would you like to run it?".to_string());
     let extra_context = &fix_prompt.map(|p| p.extra_context.clone()).flatten();
 
-    let prompt = {
-        let base_prompt = inquire::Confirm::new(&prompt_text).with_default(false);
-        match extra_context {
-            Some(help_text) => base_prompt.with_help_message(help_text),
-            None => base_prompt,
+    let user_accepted = if yolo {
+        info!(target: "always", "{} Yes (auto-approved)", prompt_text);
+        if let Some(ctx) = extra_context {
+            info!(target: "always", "[{}]", ctx);
         }
+        true
+    } else {
+        let prompt = {
+            let base_prompt = inquire::Confirm::new(&prompt_text).with_default(false);
+            match extra_context {
+                Some(help_text) => base_prompt.with_help_message(help_text),
+                None => base_prompt,
+            }
+        };
+
+        match prompt.prompt() {
+            Ok(accepted) => Ok::<bool, anyhow::Error>(accepted),
+            Err(InquireError::NotTTY) => {
+                warn!(target: "user", "Prompting user for fix, but input device is not a TTY. Skipping fix.");
+                Ok(false)
+            }
+            Err(e) => {
+                error!(target: "user", "Error prompting user for fix: {}", e);
+                Err(e.into())
+            }
+        }?
     };
 
-    match prompt.prompt() {
-        Ok(user_accepted) => {
-            if user_accepted {
-                // failure indicates an issue with us actually executing it,
-                // not the success/failure of the command itself.
-                let outputs = run_fix(working_dir, &exec_path, fix).await?;
-                let max_exit_code = outputs
-                    .iter()
-                    .map(|c| c.exit_code.unwrap_or(-1))
-                    .max()
-                    .unwrap();
+    if user_accepted {
+        // failure indicates an issue with us actually executing it,
+        // not the success/failure of the command itself.
+        let outputs = run_fix(working_dir, &exec_path, fix).await?;
+        let max_exit_code = outputs
+            .iter()
+            .map(|c| c.exit_code.unwrap_or(-1))
+            .max()
+            .unwrap();
 
-                match max_exit_code {
-                    0 => Ok(AnalyzeStatus::KnownErrorFoundFixSucceeded),
-                    _ => {
-                        if let Some(help_text) = &fix.help_text {
-                            error!(target: "user", "Fix Help: {}", help_text);
-                        }
-                        if let Some(help_url) = &fix.help_url {
-                            error!(target: "user", "For more help, please visit {}", help_url);
-                        }
-
-                        Ok(AnalyzeStatus::KnownErrorFoundFixFailed)
-                    }
+        match max_exit_code {
+            0 => Ok(AnalyzeStatus::KnownErrorFoundFixSucceeded),
+            _ => {
+                if let Some(help_text) = &fix.help_text {
+                    error!(target: "user", "Fix Help: {}", help_text);
                 }
-            } else {
-                Ok(AnalyzeStatus::KnownErrorFoundUserDenied)
+                if let Some(help_url) = &fix.help_url {
+                    error!(target: "user", "For more help, please visit {}", help_url);
+                }
+
+                Ok(AnalyzeStatus::KnownErrorFoundFixFailed)
             }
         }
-        Err(InquireError::NotTTY) => {
-            warn!(target: "user", "Prompting user for fix, but input device is not a TTY. Skipping fix.");
-            Ok(AnalyzeStatus::KnownErrorFoundUserDenied)
-        }
-        Err(e) => {
-            error!(target: "user", "Error prompting user for fix: {}", e);
-            Err(e.into())
-        }
+    } else {
+        Ok(AnalyzeStatus::KnownErrorFoundUserDenied)
     }
 }
 

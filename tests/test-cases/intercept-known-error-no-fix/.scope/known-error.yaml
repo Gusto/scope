@@ -1,0 +1,8 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeKnownError
+metadata:
+  name: something-broke
+  description: A known error with no automatic fix
+spec:
+  pattern: "something went wrong"
+  help: "This is a known issue. Check the wiki for manual steps."

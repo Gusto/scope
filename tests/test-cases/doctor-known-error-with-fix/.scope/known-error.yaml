@@ -1,0 +1,13 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeKnownError
+metadata:
+  name: missing-status-file
+  description: Detects when the fix fails because status.txt is missing
+spec:
+  pattern: fix-failed-status-missing
+  help: The status.txt file is missing.
+  fix:
+    prompt:
+      text: "Create the status.txt file?"
+    commands:
+      - bash -c 'echo "ready" > status.txt'

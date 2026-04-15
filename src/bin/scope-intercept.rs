@@ -1,9 +1,13 @@
 use clap::Parser;
 use dev_scope::prelude::*;
+use dev_scope::shared::analyze;
+use dev_scope::shared::analyze::AnalyzeStatus;
 use human_panic::setup_panic;
 use std::env;
+use std::io::Cursor;
 use std::sync::Arc;
-use tracing::{Level, debug, enabled, error, info, warn};
+use tokio::io::BufReader;
+use tracing::{Level, enabled, error, info, warn};
 
 /// A wrapper CLI that can be used to capture output from a program, check if there are known errors
 /// and let the user know.
@@ -24,6 +28,10 @@ struct Cli {
 
     #[clap(flatten)]
     config_options: ConfigOptions,
+
+    /// Automatically approve all fix prompts without asking
+    #[arg(long, short = 'y', default_value = "false")]
+    yolo: bool,
 
     /// Command to execute withing scope-intercept.
     #[arg(required = true)]
@@ -62,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_command(opts: Cli) -> anyhow::Result<i32> {
+    let yolo = opts.yolo;
     let mut command = vec![opts.utility];
     command.extend(opts.args);
     let current_dir = std::env::current_dir()?;
@@ -90,20 +99,49 @@ async fn run_command(opts: Cli) -> anyhow::Result<i32> {
         FoundConfig::empty(env::current_dir().unwrap())
     });
 
-    let command_output = capture.generate_output();
+    let analyze_status = analyze::process_lines(
+        &found_config.known_error,
+        &found_config.working_dir,
+        BufReader::new(Cursor::new(capture.generate_user_output())),
+        yolo,
+    )
+    .await?;
 
-    for known_error in found_config.known_error.values() {
-        debug!("Checking known error {}", known_error.name());
-        if known_error.regex.is_match(&command_output) {
-            info!(target: "always", "Known error '{}' found", known_error.name());
-            info!(target: "always", "\t==> {}", known_error.help_text);
-        }
+    analyze::report_result(&analyze_status);
+
+    let (capture, exit_code) =
+        if matches!(analyze_status, AnalyzeStatus::KnownErrorFoundFixSucceeded) {
+            info!(target: "always", "Fix succeeded, retrying command");
+            let retry_capture = OutputCapture::capture_output(CaptureOpts {
+                working_dir: &current_dir,
+                args: &command,
+                output_dest: OutputDisplay::Visible,
+                path: &path,
+                env_vars: Default::default(),
+            })
+            .await?;
+
+            let retry_exit_code = retry_capture.exit_code.unwrap_or(-1);
+            if accepted_exit_codes.contains(&retry_exit_code) {
+                return Ok(retry_exit_code);
+            }
+
+            (retry_capture, retry_exit_code)
+        } else {
+            (capture, exit_code)
+        };
+
+    if !found_config.report_upload.is_empty() {
+        offer_bug_report(&found_config, &command, &capture).await?;
     }
+    Ok(exit_code)
+}
 
-    if found_config.report_upload.is_empty() {
-        return Ok(exit_code);
-    }
-
+async fn offer_bug_report(
+    found_config: &FoundConfig,
+    command: &[String],
+    capture: &OutputCapture,
+) -> anyhow::Result<()> {
     let ans = inquire::Confirm::new("Do you want to upload a bug report?")
         .with_default(false)
         .with_help_message(
@@ -115,13 +153,13 @@ async fn run_command(opts: Cli) -> anyhow::Result<i32> {
         let entrypoint = command.join(" ");
         let exec_runner = Arc::new(DefaultExecutionProvider::default());
 
-        let builder = DefaultUnstructuredReportBuilder::new(&entrypoint, &capture);
+        let builder = DefaultUnstructuredReportBuilder::new(&entrypoint, capture);
 
         for location in found_config.report_upload.values() {
             let mut builder = builder.clone();
             builder
                 .run_and_append_additional_data(
-                    &found_config,
+                    found_config,
                     exec_runner.clone(),
                     &location.additional_data,
                 )
@@ -140,5 +178,5 @@ async fn run_command(opts: Cli) -> anyhow::Result<i32> {
             }
         }
     }
-    Ok(exit_code)
+    Ok(())
 }

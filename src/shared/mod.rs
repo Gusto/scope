@@ -9,7 +9,7 @@ mod capture;
 mod config_load;
 mod logging;
 
-pub(crate) mod analyze;
+pub mod analyze;
 pub mod directories;
 mod models;
 mod redact;
