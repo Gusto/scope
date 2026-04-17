@@ -49,7 +49,7 @@ normpath = "1.5.0"
 octocrab = "*"
 opentelemetry = { version = "*", features = ["metrics"] }
 opentelemetry_sdk = { version = "*", features = ["metrics", "rt-tokio", "experimental_metrics_periodicreader_with_async_runtime"] }
-opentelemetry-otlp = { version = "*", features = ["metrics", "reqwest", "http-proto", "reqwest-client", "reqwest-rustls", "grpc-tonic"] }
+opentelemetry-otlp = { version = "*", default-features = false, features = ["trace", "metrics", "internal-logs", "http-proto", "reqwest-blocking-client", "reqwest-rustls", "grpc-tonic"] }
 path-clean = "1.0.1"
 pathdiff = "0.2.3"
 petgraph = "0.8.3"
