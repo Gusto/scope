@@ -429,7 +429,11 @@ mod tests {
             .with_endpoint(url)
             .with_timeout(Duration::from_secs(3))
             .build();
-        assert!(result.is_ok(), "HTTP span exporter must build; got {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "HTTP span exporter must build; got {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -439,6 +443,10 @@ mod tests {
             .with_endpoint("http://127.0.0.1:4318")
             .with_timeout(Duration::from_secs(3))
             .build();
-        assert!(result.is_ok(), "HTTP metric exporter must build; got {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "HTTP metric exporter must build; got {:?}",
+            result.err()
+        );
     }
 }
