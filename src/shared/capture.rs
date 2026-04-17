@@ -244,7 +244,7 @@ impl OutputCapture {
         output.extend(stdout);
         output.extend(stderr);
 
-        output.sort_by(|(l_time, _), (r_time, _)| l_time.cmp(r_time));
+        output.sort_by_key(|(l_time, _)| *l_time);
 
         let text: String = output
             .iter()
@@ -260,7 +260,7 @@ impl OutputCapture {
         output.extend(self.stdout.iter());
         output.extend(self.stderr.iter());
 
-        output.sort_by(|(l_time, _), (r_time, _)| l_time.cmp(r_time));
+        output.sort_by_key(|(l_time, _)| *l_time);
 
         output
             .iter()

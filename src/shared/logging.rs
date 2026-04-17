@@ -416,3 +416,37 @@ impl LoggingOpts {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_span_exporter_builds_with_default_client() {
+        let url = Url::parse("http://127.0.0.1:4318/v1/traces").unwrap();
+        let result = SpanExporter::builder()
+            .with_http()
+            .with_endpoint(url)
+            .with_timeout(Duration::from_secs(3))
+            .build();
+        assert!(
+            result.is_ok(),
+            "HTTP span exporter must build; got {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn http_metric_exporter_builds_with_default_client() {
+        let result = MetricExporter::builder()
+            .with_http()
+            .with_endpoint("http://127.0.0.1:4318")
+            .with_timeout(Duration::from_secs(3))
+            .build();
+        assert!(
+            result.is_ok(),
+            "HTTP metric exporter must build; got {:?}",
+            result.err()
+        );
+    }
+}
