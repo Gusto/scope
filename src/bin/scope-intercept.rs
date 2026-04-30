@@ -6,7 +6,9 @@ use human_panic::setup_panic;
 use std::env;
 use std::io::Cursor;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::BufReader;
+use tokio::signal::unix::{SignalKind, signal};
 use tracing::{Level, enabled, error, info, warn};
 
 /// A wrapper CLI that can be used to capture output from a program, check if there are known errors
@@ -76,6 +78,26 @@ async fn run_command(opts: Cli) -> anyhow::Result<i32> {
     let current_dir = std::env::current_dir()?;
     let path = env::var("PATH").unwrap_or_default();
 
+    // SIGINT/SIGTERM/SIGHUP are delivered to every member of our foreground
+    // process group, including the child, so its own cleanup traps run. We
+    // just need to keep ourselves alive long enough for the child to finish
+    // shutting down — otherwise our captured stdout/stderr pipes close and
+    // the child dies with SIGPIPE before its trap can complete.
+    let interrupted = Arc::new(AtomicBool::new(false));
+    for kind in [
+        SignalKind::interrupt(),
+        SignalKind::terminate(),
+        SignalKind::hangup(),
+    ] {
+        let mut stream = signal(kind)?;
+        let interrupted = interrupted.clone();
+        tokio::spawn(async move {
+            while stream.recv().await.is_some() {
+                interrupted.store(true, Ordering::SeqCst);
+            }
+        });
+    }
+
     let capture = OutputCapture::capture_output(CaptureOpts {
         working_dir: &current_dir,
         args: &command,
@@ -90,6 +112,13 @@ async fn run_command(opts: Cli) -> anyhow::Result<i32> {
 
     let exit_code = capture.exit_code.unwrap_or(-1);
     if accepted_exit_codes.contains(&exit_code) {
+        return Ok(exit_code);
+    }
+
+    // The user explicitly asked to quit — don't surprise them with
+    // known-error prompts, retry, or bug-report offers. Just propagate the
+    // child's exit code (typically 130 for SIGINT, 143 for SIGTERM).
+    if interrupted.load(Ordering::SeqCst) {
         return Ok(exit_code);
     }
 

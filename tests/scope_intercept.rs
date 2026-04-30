@@ -1,6 +1,9 @@
 use assert_fs::fixture::{FileWriteStr, PathChild};
 use predicates::boolean::PredicateBooleanExt;
 use predicates::prelude::predicate;
+use std::os::unix::process::CommandExt;
+use std::process::Command as StdCommand;
+use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 mod common;
@@ -155,6 +158,111 @@ fn test_intercept_no_known_errors_match() {
         .code(42)
         .stdout(predicate::str::contains("No known errors found"))
         .stdout(predicate::str::contains("Fix succeeded").not());
+
+    helper.clean_work_dir();
+}
+
+// When scope-intercept wraps a long-running interactive process (e.g.
+// used as a shebang on a server start script), Ctrl+C must let the
+// child run its own SIGINT trap and exit cleanly. Before this fix,
+// scope-intercept terminated immediately on SIGINT, closing the
+// captured stdout/stderr pipes and killing the child with SIGPIPE
+// before its trap could complete.
+#[test]
+fn test_intercept_forwards_sigint_and_waits_for_child_cleanup() {
+    let helper = ScopeTestHelper::new(
+        "test_intercept_forwards_sigint_and_waits_for_child_cleanup",
+        "empty",
+    );
+
+    let work_dir = helper.work_dir.path().to_path_buf();
+    let cleanup_marker = work_dir.join("cleanup.done");
+    let ready_marker = work_dir.join("ready");
+
+    helper
+        .work_dir
+        .child("trap.sh")
+        .write_str(
+            "#!/bin/bash\n\
+             trap 'echo trapped > cleanup.done; exit 130' INT\n\
+             touch ready\n\
+             # sleep in short increments so the trap fires promptly\n\
+             for _ in $(seq 1 30); do sleep 1; done\n",
+        )
+        .unwrap();
+
+    let intercept_bin = assert_cmd::cargo::cargo_bin("scope-intercept");
+    let mut command = StdCommand::new(intercept_bin);
+    command
+        .current_dir(&work_dir)
+        .env("NO_COLOR", "1")
+        .args(["--", "bash", "trap.sh"]);
+    // Put scope-intercept in its own process group so killpg(pid, SIGINT)
+    // hits both it and the wrapped bash, mirroring how a terminal delivers
+    // Ctrl+C to the foreground process group.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().expect("failed to spawn scope-intercept");
+
+    // Wait for the bash trap to be installed.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready_marker.exists() {
+        if Instant::now() > deadline {
+            child.kill().ok();
+            panic!(
+                "trap.sh never wrote ready marker; scope-intercept may not be running the script"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let pid = child.id() as i32;
+    // SAFETY: killpg(2) with a valid pgid and SIGINT delivers to every
+    // member of the group. scope-intercept is the group leader (setsid
+    // above), so this hits both it and the wrapped bash.
+    let rc = unsafe { libc::killpg(pid, libc::SIGINT) };
+    assert_eq!(
+        rc,
+        0,
+        "killpg({pid}, SIGINT) failed: {}",
+        std::io::Error::last_os_error()
+    );
+
+    // Wait for scope-intercept to exit. If it doesn't shut down within 10s,
+    // the bug is back: scope-intercept is hanging instead of letting the
+    // child run its trap and propagating the exit.
+    let exit_deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        match child.try_wait().expect("try_wait failed") {
+            Some(status) => break status,
+            None => {
+                if Instant::now() > exit_deadline {
+                    child.kill().ok();
+                    panic!("scope-intercept did not exit within 10s after SIGINT");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+
+    assert!(
+        cleanup_marker.exists(),
+        "child SIGINT trap did not run — cleanup.done was never created"
+    );
+    let body = std::fs::read_to_string(&cleanup_marker).unwrap();
+    assert_eq!(body.trim(), "trapped");
+
+    assert_eq!(
+        status.code(),
+        Some(130),
+        "scope-intercept should propagate the child's exit code (130 for SIGINT), got {status:?}"
+    );
 
     helper.clean_work_dir();
 }
