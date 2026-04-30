@@ -1,9 +1,12 @@
 use assert_fs::fixture::{FileWriteStr, PathChild};
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::{Pid, setsid};
 use predicates::boolean::PredicateBooleanExt;
 use predicates::prelude::predicate;
 use std::os::unix::process::CommandExt;
 use std::process::Command as StdCommand;
 use std::time::{Duration, Instant};
+use wait_timeout::ChildExt;
 
 #[allow(dead_code)]
 mod common;
@@ -197,20 +200,21 @@ fn test_intercept_forwards_sigint_and_waits_for_child_cleanup() {
         .current_dir(&work_dir)
         .env("NO_COLOR", "1")
         .args(["--", "bash", "trap.sh"]);
-    // Put scope-intercept in its own process group so killpg(pid, SIGINT)
+    // Put scope-intercept in its own session/process group so killpg below
     // hits both it and the wrapped bash, mirroring how a terminal delivers
     // Ctrl+C to the foreground process group.
+    //
+    // SAFETY: pre_exec runs the closure between fork and exec, so it must
+    // call only async-signal-safe functions. setsid(2) is on the POSIX
+    // async-signal-safe list and touches no shared state in the parent.
     unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        command.pre_exec(|| setsid().map(|_| ()).map_err(std::io::Error::from));
     }
     let mut child = command.spawn().expect("failed to spawn scope-intercept");
 
-    // Wait for the bash trap to be installed.
+    // Poll for the ready marker. There's no good cross-process "file
+    // appeared" primitive without bringing in inotify/kqueue, so we
+    // sleep between checks to avoid burning a core.
     let deadline = Instant::now() + Duration::from_secs(5);
     while !ready_marker.exists() {
         if Instant::now() > deadline {
@@ -222,32 +226,20 @@ fn test_intercept_forwards_sigint_and_waits_for_child_cleanup() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let pid = child.id() as i32;
-    // SAFETY: killpg(2) with a valid pgid and SIGINT delivers to every
-    // member of the group. scope-intercept is the group leader (setsid
-    // above), so this hits both it and the wrapped bash.
-    let rc = unsafe { libc::killpg(pid, libc::SIGINT) };
-    assert_eq!(
-        rc,
-        0,
-        "killpg({pid}, SIGINT) failed: {}",
-        std::io::Error::last_os_error()
-    );
+    let pgid = Pid::from_raw(child.id() as i32);
+    killpg(pgid, Signal::SIGINT).expect("killpg(pgid, SIGINT) failed");
 
-    // Wait for scope-intercept to exit. If it doesn't shut down within 10s,
-    // the bug is back: scope-intercept is hanging instead of letting the
-    // child run its trap and propagating the exit.
-    let exit_deadline = Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        match child.try_wait().expect("try_wait failed") {
-            Some(status) => break status,
-            None => {
-                if Instant::now() > exit_deadline {
-                    child.kill().ok();
-                    panic!("scope-intercept did not exit within 10s after SIGINT");
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
+    // If scope-intercept doesn't shut down within 10s, the bug is back:
+    // it's hanging instead of letting the child run its trap and
+    // propagating the exit.
+    let status = match child
+        .wait_timeout(Duration::from_secs(10))
+        .expect("wait_timeout failed")
+    {
+        Some(status) => status,
+        None => {
+            child.kill().ok();
+            panic!("scope-intercept did not exit within 10s after SIGINT");
         }
     };
 
