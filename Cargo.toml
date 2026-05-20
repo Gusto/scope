@@ -1,6 +1,6 @@
 [package]
 name = "dev-scope"
-version = "2026.5.20+1724"
+version = "2026.5.20+1816"
 edition = "2024"
 default-run = "scope"
 repository = "https://github.com/oscope-dev/scope"
@@ -42,7 +42,7 @@ json = "0.12"
 jsonschema = "0.33"
 jsonwebtoken = "*"
 lazy_static = "1.5.0"
-minijinja = { version = "2.19.0", features = ["loader"] }
+minijinja = { version = "2.20.0", features = ["loader"] }
 mockall = "0.14.0"
 nanoid = "0.5"
 normpath = "1.5.1"
