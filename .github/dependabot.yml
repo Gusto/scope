@@ -6,7 +6,19 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 2
     groups:
+      opentelemetry:
+        # opentelemetry-otlp, opentelemetry_sdk must all move together because
+        # they share trait surfaces between minor versions. tracing-opentelemetry
+        # must also move in lockstep because its minor version trails opentelemetry
+        # by one (0.32 => otel 0.31, 0.33 => otel 0.32).
+        applies-to: version-updates
+        patterns:
+          - "opentelemetry*"
+          - "tracing-opentelemetry"
       prod-dependencies:
         applies-to: version-updates
         patterns:
           - "*"
+        exclude-patterns:
+          - "opentelemetry*"
+          - "tracing-opentelemetry"
