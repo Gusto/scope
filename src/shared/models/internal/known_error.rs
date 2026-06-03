@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use crate::models::prelude::{ModelMetadata, V1AlphaKnownError};
 use crate::models::HelpMetadata;
+use crate::models::prelude::{ModelMetadata, V1AlphaKnownError};
 use derivative::Derivative;
-use regex::Regex;
+use regex::RegexSet;
 
 use super::fix::DoctorFix;
 
@@ -13,11 +13,17 @@ use super::fix::DoctorFix;
 pub struct KnownError {
     pub full_name: String,
     pub metadata: ModelMetadata,
-    pub patterns: Vec<String>,
     #[derivative(PartialEq = "ignore")]
-    pub regexes: Vec<Regex>,
+    pub regexes: RegexSet,
     pub help_text: String,
     pub fix: Option<DoctorFix>,
+}
+
+impl KnownError {
+    /// Returns the original pattern strings in the order they were defined.
+    pub fn patterns(&self) -> &[String] {
+        self.regexes.patterns()
+    }
 }
 
 impl HelpMetadata for KnownError {
@@ -41,10 +47,8 @@ impl TryFrom<V1AlphaKnownError> for KnownError {
                 value.full_name()
             );
         }
-        let regexes = patterns
-            .iter()
-            .map(|p| Regex::new(p))
-            .collect::<Result<Vec<_>, _>>()?;
+        // RegexSet::new accepts empty iterators, so the guard above is required.
+        let regexes = RegexSet::new(&patterns)?;
 
         let binding = value.metadata.containing_dir();
         let containing_dir = Path::new(&binding);
@@ -68,7 +72,6 @@ impl TryFrom<V1AlphaKnownError> for KnownError {
         Ok(KnownError {
             full_name: value.full_name(),
             metadata: value.metadata,
-            patterns,
             regexes,
             help_text: value.spec.help,
             fix: maybe_fix,
@@ -131,7 +134,7 @@ spec:
             "The command had an error, try reading the logs around there to find out what happened.",
             model.help_text
         );
-        assert_eq!(vec!["error".to_string()], model.patterns);
+        assert_eq!(["error"], model.patterns());
     }
 
     #[test]
@@ -153,10 +156,7 @@ spec:
         let model = configs[0].get_known_error_spec().unwrap();
 
         assert_eq!("multi-error", model.metadata.name);
-        assert_eq!(
-            vec!["first error".to_string(), "second error".to_string()],
-            model.patterns
-        );
+        assert_eq!(["first error", "second error"], model.patterns());
         assert_eq!(2, model.regexes.len());
     }
 
@@ -211,12 +211,13 @@ spec:
 
         let actual = KnownError::try_from(input.clone()).unwrap();
 
+        // regexes is PartialEq-ignored; check patterns explicitly.
+        assert_eq!(["some regex pattern"], actual.patterns());
         assert_eq!(
             KnownError {
                 full_name: "ScopeKnownError/some test error".to_string(),
                 metadata: input.metadata,
-                patterns: vec!["some regex pattern".to_string()],
-                regexes: vec![Regex::new("some regex pattern").unwrap()],
+                regexes: RegexSet::new(["some regex pattern"]).unwrap(),
                 help_text: input.spec.help,
                 fix: Some(
                     DoctorFix::from_spec(
@@ -256,13 +257,10 @@ spec:
 
         let actual = KnownError::try_from(input).unwrap();
 
-        assert_eq!(
-            vec!["alpha error".to_string(), "beta error".to_string()],
-            actual.patterns
-        );
+        assert_eq!(["alpha error", "beta error"], actual.patterns());
         assert_eq!(2, actual.regexes.len());
-        assert!(actual.regexes[0].is_match("alpha error in output"));
-        assert!(actual.regexes[1].is_match("beta error in output"));
-        assert!(!actual.regexes[0].is_match("unrelated line"));
+        assert!(actual.regexes.is_match("alpha error in output"));
+        assert!(actual.regexes.is_match("beta error in output"));
+        assert!(!actual.regexes.is_match("unrelated line"));
     }
 }
