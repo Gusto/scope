@@ -224,11 +224,12 @@
           "type": "string"
         },
         {
-          "description": "A list of regex patterns; the known error fires when any one matches.",
+          "description": "A list of regex patterns (at least one); the known error fires when any one matches.",
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "minItems": 1
         }
       ]
     },
