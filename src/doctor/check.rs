@@ -1601,8 +1601,8 @@ pub(crate) mod tests {
                     },
                     labels: BTreeMap::new(),
                 },
-                pattern: pattern.to_string(),
-                regex: Regex::new(pattern).unwrap(),
+                patterns: vec![pattern.to_string()],
+                regexes: vec![Regex::new(pattern).unwrap()],
                 help_text: "test help".to_string(),
                 fix,
             }

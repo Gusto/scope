@@ -1,0 +1,10 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeKnownError
+metadata:
+  name: disk-full-or-oom
+  description: Check if the output contains a disk-full or out-of-memory error
+spec:
+  pattern:
+    - "No space left on device"
+    - "Out of memory"
+  help: "The system ran out of disk space or memory. Free up resources and try again."

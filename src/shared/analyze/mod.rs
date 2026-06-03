@@ -34,7 +34,7 @@ where
         let mut known_errors_to_remove = Vec::new();
         for (name, ke) in &known_errors {
             debug!("Checking known error {}", ke.name());
-            if ke.regex.is_match(&line) {
+            if ke.regexes.iter().any(|r| r.is_match(&line)) {
                 warn!(target: "always", "Known error '{}' found on line {}", ke.name(), line_number);
                 info!(target: "always", "\t==> {}", ke.help_text);
 
