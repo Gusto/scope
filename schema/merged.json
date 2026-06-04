@@ -216,6 +216,23 @@
         "ScopeKnownError"
       ]
     },
+    "KnownErrorPattern": {
+      "description": "One or more regexes that determine whether a log line matches this known error.\nAccepts either a single pattern string or a list of pattern strings; a line matching\nany one of the patterns triggers the error.",
+      "anyOf": [
+        {
+          "description": "A single regex pattern.",
+          "type": "string"
+        },
+        {
+          "description": "A list of regex patterns (at least one); the known error fires when any one matches.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      ]
+    },
     "KnownErrorSpec": {
       "description": "Definition of the known error",
       "type": "object",
@@ -236,8 +253,8 @@
           "type": "string"
         },
         "pattern": {
-          "description": "A Regex used to determine if the line is an error.",
-          "type": "string"
+          "description": "A regex (or list of regexes) used to determine if the line is an error.\nA single string or a list of strings are both accepted; the known error fires when any\npattern matches.",
+          "$ref": "#/$defs/KnownErrorPattern"
         }
       },
       "additionalProperties": false,
