@@ -368,15 +368,15 @@ mod tests {
         let canonical_nested = fs::canonicalize(&nested_dir).unwrap();
 
         // Should include .scope directories for all ancestors
-        let expected_paths = vec![
+        let expected_paths = [
             canonical_nested.join(".scope"),
-            canonical_nested.parent().unwrap().join(".scope"), // child
+            canonical_nested.parent().unwrap().join(".scope"),
             canonical_nested
                 .parent()
                 .unwrap()
                 .parent()
                 .unwrap()
-                .join(".scope"), // parent
+                .join(".scope"),
             canonical_nested
                 .parent()
                 .unwrap()
@@ -384,7 +384,7 @@ mod tests {
                 .unwrap()
                 .parent()
                 .unwrap()
-                .join(".scope"), // temp_dir
+                .join(".scope"),
         ];
 
         // Check that all expected ancestor paths are present (in order)

@@ -1573,7 +1573,7 @@ pub(crate) mod tests {
         use super::*;
         use crate::models::prelude::{ModelMetadata, ModelMetadataAnnotations};
         use crate::shared::analyze::AnalyzeStatus;
-        use regex::Regex;
+        use regex::RegexSet;
 
         fn make_known_error(pattern: &str, with_fix: bool) -> KnownError {
             let fix = if with_fix {
@@ -1601,8 +1601,7 @@ pub(crate) mod tests {
                     },
                     labels: BTreeMap::new(),
                 },
-                pattern: pattern.to_string(),
-                regex: Regex::new(pattern).unwrap(),
+                regexes: RegexSet::new([pattern]).unwrap(),
                 help_text: "test help".to_string(),
                 fix,
             }
