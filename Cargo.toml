@@ -34,7 +34,7 @@ fake = "5.1.0"
 gethostname = "1.1.0"
 glob = "0.3"
 human-panic = "2.0.8"
-ignore = "0.4.25"
+ignore = "0.4.26"
 indicatif = "*"
 inquire = {  version = "0.9", features = ["editor"]}
 itertools = { version = "0.14", features = [] }
