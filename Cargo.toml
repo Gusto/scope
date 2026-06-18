@@ -37,7 +37,7 @@ human-panic = "2.0.8"
 ignore = "0.4.25"
 indicatif = "*"
 inquire = {  version = "0.9", features = ["editor"]}
-itertools = { version = "0.14", features = [] }
+itertools = { version = "0.15", features = [] }
 jsonschema = "0.33"
 jsonwebtoken = "*"
 lazy_static = "1.5.0"
