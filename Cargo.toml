@@ -1,6 +1,6 @@
 [package]
 name = "dev-scope"
-version = "2026.6.4+1851"
+version = "2026.6.18+1346"
 edition = "2024"
 default-run = "scope"
 repository = "https://github.com/oscope-dev/scope"
@@ -38,7 +38,6 @@ ignore = "0.4.25"
 indicatif = "*"
 inquire = {  version = "0.9", features = ["editor"]}
 itertools = { version = "0.14", features = [] }
-json = "0.12"
 jsonschema = "0.33"
 jsonwebtoken = "*"
 lazy_static = "1.5.0"
@@ -79,7 +78,6 @@ which = { version = "8.0", features = ["regex"] }
 [dev-dependencies]
 assert_cmd = "2.2.2"
 assert_fs = "1.1.4"
-escargot = "0.5.15"
 nix = { version = "0.31", features = ["signal", "process"] }
 predicates = "3.1.4"
 tempfile = "3.27"
