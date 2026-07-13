@@ -657,7 +657,7 @@ mod tests {
         GroupActionContainer, GroupOrderParams, RunGroups, compute_group_order,
     };
     use crate::doctor::tests::{group_noop, make_root_model_additional};
-    use crate::prelude::{ActionReport, ActionTaskReport, MockExecutionProvider};
+    use crate::prelude::{ActionReport, ActionTaskReport, CaptureError, MockExecutionProvider};
     use anyhow::Result;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
@@ -1369,6 +1369,36 @@ mod tests {
         assert!(!container.should_skip_group().await?);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_skip_group_propagates_command_error() {
+        let test_group = make_root_model_additional(
+            vec![],
+            |meta| meta.name("test-group"),
+            |group| {
+                group.skip(SkipSpec::Command {
+                    command: "boom".to_string(),
+                })
+            },
+        );
+
+        let mut mock_exec = MockExecutionProvider::new();
+        mock_exec.expect_run_command().times(1).returning(|_| {
+            Err(CaptureError::MissingShExec {
+                name: "boom".to_string(),
+            })
+        });
+
+        let container: GroupActionContainer<MockDoctorActionRun> = GroupActionContainer {
+            group: test_group,
+            actions: vec![],
+            exec_provider: Arc::new(mock_exec),
+            exec_working_dir: Default::default(),
+            sys_path: "".to_string(),
+        };
+
+        assert!(container.should_skip_group().await.is_err());
     }
 
     #[tokio::test]
