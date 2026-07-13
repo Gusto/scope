@@ -198,7 +198,8 @@ where
         for group_name in &self.skipped_groups {
             debug_assert!(
                 !run_result.succeeded_groups.contains(group_name)
-                    && !run_result.failed_group.contains(group_name),
+                    && !run_result.failed_group.contains(group_name)
+                    && !run_result.skipped_group.contains(group_name),
                 "group {group_name} was both executed and planned-skipped"
             );
             warn!(target: "always", "Group skipped, group: \"{}\"", group_name);
@@ -479,40 +480,70 @@ fn action_task_reports_for_display(action_report: &ActionReport) -> Vec<ActionTa
     }
 }
 
+/// A dependency graph over a set of groups, along with the lookup from group name to its node.
+struct DependencyGraph<'a> {
+    graph: DiGraph<&'a str, i32>,
+    node_graph: BTreeMap<String, NodeIndex>,
+}
+
 /// Builds the dependency graph over every group not in `exclude`, with an edge from each
 /// dependency to its dependent (per `requires`).
 fn build_dependency_graph<'a>(
     groups: &'a BTreeMap<String, DoctorGroup>,
     exclude: &BTreeSet<String>,
-) -> (DiGraph<&'a str, i32>, BTreeMap<String, NodeIndex>) {
+) -> DependencyGraph<'a> {
+    let included = |name: &String| !exclude.contains(name);
+
     let mut graph = DiGraph::<&str, i32>::new();
-    let mut node_graph: BTreeMap<String, NodeIndex> = BTreeMap::new();
+    let node_graph: BTreeMap<String, NodeIndex> = groups
+        .keys()
+        .filter(|name| included(name))
+        .map(|name| (name.clone(), graph.add_node(name)))
+        .collect();
 
-    for name in groups.keys() {
-        if exclude.contains(name) {
-            continue;
-        }
-        node_graph.insert(name.to_string(), graph.add_node(name));
-    }
-
-    for (name, model) in groups {
-        if exclude.contains(name) {
-            continue;
-        }
+    for (name, model) in groups.iter().filter(|(name, _)| included(name)) {
         let this = node_graph[name];
-        for dep in &model.requires {
-            if exclude.contains(dep) {
-                continue;
-            }
-            if let Some(other) = node_graph.get(dep) {
-                graph.add_edge(*other, this, 1);
-            } else {
-                warn!(target: "user", "{} needs {} but no such dependency found, ignoring dependency", name, dep);
+        for dep in model.requires.iter().filter(|dep| included(dep)) {
+            match node_graph.get(dep) {
+                Some(other) => {
+                    graph.add_edge(*other, this, 1);
+                }
+                None => {
+                    warn!(target: "user", "{} needs {} but no such dependency found, ignoring dependency", name, dep)
+                }
             }
         }
     }
 
-    (graph, node_graph)
+    DependencyGraph { graph, node_graph }
+}
+
+/// Adds a synthetic "start" node to `graph`, wired from every name in `roots`, and returns its
+/// index.
+fn wire_start_node(
+    graph: &mut DiGraph<&str, i32>,
+    node_graph: &BTreeMap<String, NodeIndex>,
+    roots: &BTreeSet<String>,
+) -> NodeIndex {
+    let start = graph.add_node("start");
+    for name in roots {
+        if let Some(this) = node_graph.get(name) {
+            graph.add_edge(*this, start, 1);
+        }
+    }
+    start
+}
+
+/// Reverses `graph` and returns the dependency-first (post-order) traversal of everything
+/// reachable from `start`, excluding `start` itself.
+fn traversal_order_from(graph: &mut DiGraph<&str, i32>, start: NodeIndex) -> Vec<String> {
+    graph.reverse();
+
+    DfsPostOrder::new(&*graph, start)
+        .iter(&*graph)
+        .filter(|&node| node != start)
+        .map(|node| graph.node_weight(node).unwrap().to_string())
+        .collect()
 }
 
 /// Names of every group reachable from `desired_groups`, over the dependency graph with
@@ -523,22 +554,23 @@ fn reachable_group_names(
     desired_groups: &BTreeSet<String>,
     exclude: &BTreeSet<String>,
 ) -> BTreeSet<String> {
-    let (mut graph, node_graph) = build_dependency_graph(groups, exclude);
+    let DependencyGraph {
+        mut graph,
+        node_graph,
+    } = build_dependency_graph(groups, exclude);
 
-    let start = graph.add_node("start");
-    for name in desired_groups {
-        if let Some(this) = node_graph.get(name) {
-            graph.add_edge(*this, start, 1);
-        }
-    }
-
-    graph.reverse();
-
-    DfsPostOrder::new(&graph, start)
-        .iter(&graph)
-        .filter(|&node| node != start)
-        .map(|node| graph.node_weight(node).unwrap().to_string())
+    let start = wire_start_node(&mut graph, &node_graph, desired_groups);
+    traversal_order_from(&mut graph, start)
+        .into_iter()
         .collect()
+}
+
+/// Arguments for [`compute_group_order`].
+pub struct GroupOrderParams<'a> {
+    pub groups: &'a BTreeMap<String, DoctorGroup>,
+    pub desired_groups: &'a BTreeSet<String>,
+    pub skip_subtree: &'a BTreeSet<String>,
+    pub skip_only: &'a BTreeSet<String>,
 }
 
 /// Computes the topologically-sorted set of groups to run, starting from `desired_groups` and
@@ -548,12 +580,14 @@ fn reachable_group_names(
 /// non-skipped group (a shared dependency survives). `skip_only` groups are removed but their
 /// dependencies are always kept — unless that group was never going to run in the first place,
 /// in which case `--skip-only` on it is a no-op rather than pulling in unrelated work.
-pub fn compute_group_order(
-    groups: &BTreeMap<String, DoctorGroup>,
-    desired_groups: BTreeSet<String>,
-    skip_subtree: &BTreeSet<String>,
-    skip_only: &BTreeSet<String>,
-) -> Vec<String> {
+pub fn compute_group_order(params: GroupOrderParams) -> Vec<String> {
+    let GroupOrderParams {
+        groups,
+        desired_groups,
+        skip_subtree,
+        skip_only,
+    } = params;
+
     let all_skipped: BTreeSet<String> = skip_subtree.union(skip_only).cloned().collect();
 
     // Only force-keep a `skip_only` group's dependencies if that group would actually have run
@@ -561,14 +595,18 @@ pub fn compute_group_order(
     let would_have_run = if skip_only.is_empty() {
         BTreeSet::new()
     } else {
-        reachable_group_names(groups, &desired_groups, skip_subtree)
+        reachable_group_names(groups, desired_groups, skip_subtree)
     };
 
-    let (mut graph, node_graph) = build_dependency_graph(groups, &all_skipped);
+    let DependencyGraph {
+        mut graph,
+        node_graph,
+    } = build_dependency_graph(groups, &all_skipped);
 
     let roots: BTreeSet<String> = desired_groups
-        .into_iter()
-        .filter(|name| !all_skipped.contains(name))
+        .iter()
+        .filter(|name| !all_skipped.contains(*name))
+        .cloned()
         .chain(
             skip_only
                 .iter()
@@ -579,13 +617,7 @@ pub fn compute_group_order(
         )
         .collect();
 
-    let start = graph.add_node("start");
-
-    for name in &roots {
-        if let Some(this) = node_graph.get(name) {
-            graph.add_edge(*this, start, 1);
-        }
-    }
+    let start = wire_start_node(&mut graph, &node_graph, &roots);
 
     debug!(
         format = "graphviz",
@@ -593,13 +625,7 @@ pub fn compute_group_order(
         Dot::with_config(&graph, &[Config::EdgeNoLabel])
     );
 
-    graph.reverse();
-
-    let order: Vec<String> = DfsPostOrder::new(&graph, start)
-        .iter(&graph)
-        .filter(|&node| node != start)
-        .map(|node| graph.node_weight(node).unwrap().to_string())
-        .collect();
+    let order = traversal_order_from(&mut graph, start);
 
     debug!(
         target: "user",
@@ -626,7 +652,9 @@ mod tests {
     use crate::doctor::check::{
         ActionRunResult, ActionRunStatus, DoctorActionRun, MockDoctorActionRun,
     };
-    use crate::doctor::runner::{GroupActionContainer, RunGroups, compute_group_order};
+    use crate::doctor::runner::{
+        GroupActionContainer, GroupOrderParams, RunGroups, compute_group_order,
+    };
     use crate::doctor::tests::{group_noop, make_root_model_additional};
     use crate::prelude::{ActionReport, ActionTaskReport, MockExecutionProvider};
     use anyhow::Result;
@@ -660,7 +688,13 @@ mod tests {
 
         assert_eq!(
             0,
-            compute_group_order(&groups, BTreeSet::new(), &no_skip(), &no_skip()).len()
+            compute_group_order(GroupOrderParams {
+                groups: &groups,
+                desired_groups: &BTreeSet::new(),
+                skip_subtree: &no_skip(),
+                skip_only: &no_skip(),
+            })
+            .len()
         );
 
         Ok(())
@@ -688,12 +722,12 @@ mod tests {
 
         assert_eq!(
             vec!["step_1", "step_2"],
-            compute_group_order(
-                &groups,
-                BTreeSet::from(["step_2".to_string()]),
-                &no_skip(),
-                &no_skip()
-            )
+            compute_group_order(GroupOrderParams {
+                groups: &groups,
+                desired_groups: &BTreeSet::from(["step_2".to_string()]),
+                skip_subtree: &no_skip(),
+                skip_only: &no_skip(),
+            })
         );
 
         Ok(())
@@ -728,12 +762,12 @@ mod tests {
 
         assert_eq!(
             vec!["step_3", "step_2", "step_1"],
-            compute_group_order(
-                &groups,
-                BTreeSet::from(["step_1".to_string()]),
-                &no_skip(),
-                &no_skip()
-            )
+            compute_group_order(GroupOrderParams {
+                groups: &groups,
+                desired_groups: &BTreeSet::from(["step_1".to_string()]),
+                skip_subtree: &no_skip(),
+                skip_only: &no_skip(),
+            })
         );
 
         Ok(())
@@ -768,12 +802,12 @@ mod tests {
 
         assert_eq!(
             vec!["step_1", "step_2", "step_3"],
-            compute_group_order(
-                &groups,
-                BTreeSet::from(["step_3".to_string()]),
-                &no_skip(),
-                &no_skip()
-            )
+            compute_group_order(GroupOrderParams {
+                groups: &groups,
+                desired_groups: &BTreeSet::from(["step_3".to_string()]),
+                skip_subtree: &no_skip(),
+                skip_only: &no_skip(),
+            })
         );
 
         Ok(())
@@ -808,12 +842,12 @@ mod tests {
 
         assert_eq!(
             vec!["step_1", "step_3"],
-            compute_group_order(
-                &groups,
-                BTreeSet::from(["step_3".to_string()]),
-                &no_skip(),
-                &no_skip()
-            )
+            compute_group_order(GroupOrderParams {
+                groups: &groups,
+                desired_groups: &BTreeSet::from(["step_3".to_string()]),
+                skip_subtree: &no_skip(),
+                skip_only: &no_skip(),
+            })
         );
 
         Ok(())
@@ -875,12 +909,12 @@ mod tests {
     async fn test_compute_group_order_skip_trims_exclusive_dependencies() -> Result<()> {
         let groups = make_dependency_chain();
 
-        let order = compute_group_order(
-            &groups,
-            BTreeSet::from(["a".to_string(), "d".to_string()]),
-            &BTreeSet::from(["a".to_string()]),
-            &no_skip(),
-        );
+        let order = compute_group_order(GroupOrderParams {
+            groups: &groups,
+            desired_groups: &BTreeSet::from(["a".to_string(), "d".to_string()]),
+            skip_subtree: &BTreeSet::from(["a".to_string()]),
+            skip_only: &no_skip(),
+        });
 
         // `a`, and its exclusive deps `b`/`c`, are trimmed; `d` and its dep are untouched.
         assert_eq!(vec!["shared", "d"], order);
@@ -896,12 +930,12 @@ mod tests {
         // `a-and-shared` requires both `a` and `shared`. Skipping `a` force-removes it (and its
         // exclusive deps `b`/`c`) even though `a-and-shared` — a non-skipped root — depends on
         // it. `shared` survives because `a-and-shared` also depends on it directly.
-        let order = compute_group_order(
-            &groups,
-            BTreeSet::from(["a-and-shared".to_string()]),
-            &BTreeSet::from(["a".to_string()]),
-            &no_skip(),
-        );
+        let order = compute_group_order(GroupOrderParams {
+            groups: &groups,
+            desired_groups: &BTreeSet::from(["a-and-shared".to_string()]),
+            skip_subtree: &BTreeSet::from(["a".to_string()]),
+            skip_only: &no_skip(),
+        });
 
         assert_eq!(vec!["shared", "a-and-shared"], order);
 
@@ -913,12 +947,12 @@ mod tests {
         let groups = make_dependency_chain();
 
         // `--skip-only=a` removes just `a`; its exclusive deps `b`/`c` still run.
-        let order = compute_group_order(
-            &groups,
-            BTreeSet::from(["a".to_string()]),
-            &no_skip(),
-            &BTreeSet::from(["a".to_string()]),
-        );
+        let order = compute_group_order(GroupOrderParams {
+            groups: &groups,
+            desired_groups: &BTreeSet::from(["a".to_string()]),
+            skip_subtree: &no_skip(),
+            skip_only: &BTreeSet::from(["a".to_string()]),
+        });
 
         assert_eq!(vec!["c", "b"], order);
 
@@ -931,12 +965,12 @@ mod tests {
 
         // Only `d` is desired; `a` (and its exclusive deps `b`/`c`) were never going to run in
         // the first place. `--skip-only=a` must not pull `b`/`c` in as unrelated new work.
-        let order = compute_group_order(
-            &groups,
-            BTreeSet::from(["d".to_string()]),
-            &no_skip(),
-            &BTreeSet::from(["a".to_string()]),
-        );
+        let order = compute_group_order(GroupOrderParams {
+            groups: &groups,
+            desired_groups: &BTreeSet::from(["d".to_string()]),
+            skip_subtree: &no_skip(),
+            skip_only: &BTreeSet::from(["a".to_string()]),
+        });
 
         assert_eq!(vec!["shared", "d"], order);
 
@@ -1257,6 +1291,31 @@ mod tests {
         let task_reports = action_task_reports_for_display(&action_report);
         let actual = task_reports.first().unwrap();
         assert_eq!(actual.output, Some("validate output".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_returns_command_output() -> Result<()> {
+        let test_group =
+            make_root_model_additional(vec![], |meta| meta.name("test-group"), group_noop);
+
+        let mut mock_exec = MockExecutionProvider::new();
+        mock_exec
+            .expect_run_for_output()
+            .times(1)
+            .withf(|_, _, command| command == "echo hi")
+            .returning(|_, _, _| "hi".to_string());
+
+        let container: GroupActionContainer<MockDoctorActionRun> = GroupActionContainer {
+            group: test_group,
+            actions: vec![],
+            exec_provider: Arc::new(mock_exec),
+            exec_working_dir: Default::default(),
+            sys_path: "".to_string(),
+        };
+
+        assert_eq!("hi", container.execute_command("echo hi").await?);
+
+        Ok(())
     }
 
     #[tokio::test]

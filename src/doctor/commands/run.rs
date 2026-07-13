@@ -8,7 +8,9 @@ use tracing::{info, instrument, warn};
 
 use crate::doctor::check::{DefaultDoctorActionRun, DefaultGlobWalker};
 use crate::doctor::file_cache::{FileBasedCache, FileCache, NoOpCache};
-use crate::doctor::runner::{GroupActionContainer, RunGroups, compute_group_order};
+use crate::doctor::runner::{
+    GroupActionContainer, GroupOrderParams, RunGroups, compute_group_order,
+};
 use crate::prelude::{
     DefaultGroupedReportBuilder, ExecutionProvider, GroupedReportBuilder, ReportRenderer,
 };
@@ -101,15 +103,22 @@ fn migrate_old_cache(old_path: &PathBuf, new_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// The result of [`resolve_skips`]: the final skip sets used to build the run order, plus the
+/// subset of those groups that would otherwise have run (for reporting).
+struct SkipResolution {
+    skip_subtree: BTreeSet<String>,
+    skip_only: BTreeSet<String>,
+    skipped_groups: BTreeSet<String>,
+}
+
 /// Resolves the CLI `--skip`/`--skip-only` names plus each candidate group's own `skip` config
 /// (evaluated here, at planning time, so a `skip: true`/`skip: { command }` group can trim its
-/// dependency subtree the same way `--skip` does) into the final skip sets used to build the run
-/// order, along with the subset of those groups that would otherwise have run (for reporting).
+/// dependency subtree the same way `--skip` does) into a [`SkipResolution`].
 async fn resolve_skips(
     found_config: &FoundConfig,
     transform: &RunTransform,
     args: &DoctorRunArgs,
-) -> Result<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)> {
+) -> Result<SkipResolution> {
     let cli_skip: BTreeSet<String> = args.skip.clone().unwrap_or_default().into_iter().collect();
     let skip_only: BTreeSet<String> = args
         .skip_only
@@ -120,12 +129,12 @@ async fn resolve_skips(
     warn_on_unknown_group(found_config, &cli_skip, "--skip");
     warn_on_unknown_group(found_config, &skip_only, "--skip-only");
 
-    let candidate_order = compute_group_order(
-        &found_config.doctor_group,
-        transform.desired_groups.clone(),
-        &BTreeSet::new(),
-        &BTreeSet::new(),
-    );
+    let candidate_order = compute_group_order(GroupOrderParams {
+        groups: &found_config.doctor_group,
+        desired_groups: &transform.desired_groups,
+        skip_subtree: &BTreeSet::new(),
+        skip_only: &BTreeSet::new(),
+    });
 
     let mut skip_subtree = cli_skip;
     for name in &candidate_order {
@@ -144,7 +153,11 @@ async fn resolve_skips(
         .filter(|name| skip_subtree.contains(name) || skip_only.contains(name))
         .collect();
 
-    Ok((skip_subtree, skip_only, skipped_groups))
+    Ok(SkipResolution {
+        skip_subtree,
+        skip_only,
+        skipped_groups,
+    })
 }
 
 fn warn_on_unknown_group(found_config: &FoundConfig, names: &BTreeSet<String>, flag: &str) {
@@ -158,15 +171,18 @@ fn warn_on_unknown_group(found_config: &FoundConfig, names: &BTreeSet<String>, f
 #[instrument("scope doctor run", skip(found_config))]
 pub async fn doctor_run(found_config: &FoundConfig, args: &DoctorRunArgs) -> Result<i32> {
     let transform = transform_inputs(found_config, args);
-    let (skip_subtree, skip_only, skipped_groups) =
-        resolve_skips(found_config, &transform, args).await?;
+    let SkipResolution {
+        skip_subtree,
+        skip_only,
+        skipped_groups,
+    } = resolve_skips(found_config, &transform, args).await?;
 
-    let all_paths = compute_group_order(
-        &found_config.doctor_group,
-        transform.desired_groups,
-        &skip_subtree,
-        &skip_only,
-    );
+    let all_paths = compute_group_order(GroupOrderParams {
+        groups: &found_config.doctor_group,
+        desired_groups: &transform.desired_groups,
+        skip_subtree: &skip_subtree,
+        skip_only: &skip_only,
+    });
     if all_paths.is_empty() && skipped_groups.is_empty() {
         warn!(target: "user", "Could not find any tasks to execute");
     }
@@ -312,7 +328,9 @@ mod test {
     use crate::doctor::commands::DoctorRunArgs;
     use crate::doctor::commands::run::transform_inputs;
     use crate::doctor::tests::{group_noop, make_root_model_additional, meta_noop};
-    use crate::prelude::{FoundConfig, SkipSpec};
+    use crate::prelude::{
+        DoctorGroup, FoundConfig, MockExecutionProvider, OutputCaptureBuilder, SkipSpec,
+    };
 
     #[test]
     fn test_will_include_by_default() {
@@ -356,8 +374,11 @@ mod test {
         };
 
         let transform = transform_inputs(&fc, &args);
-        let (skip_subtree, skip_only, skipped_groups) =
-            resolve_skips(&fc, &transform, &args).await.unwrap();
+        let SkipResolution {
+            skip_subtree,
+            skip_only,
+            skipped_groups,
+        } = resolve_skips(&fc, &transform, &args).await.unwrap();
 
         assert_eq!(BTreeSet::from(["a".to_string()]), skip_subtree);
         assert!(skip_only.is_empty());
@@ -381,8 +402,11 @@ mod test {
         };
 
         let transform = transform_inputs(&fc, &args);
-        let (skip_subtree, _, skipped_groups) =
-            resolve_skips(&fc, &transform, &args).await.unwrap();
+        let SkipResolution {
+            skip_subtree,
+            skipped_groups,
+            ..
+        } = resolve_skips(&fc, &transform, &args).await.unwrap();
 
         assert_eq!(
             BTreeSet::from(["configured-skip".to_string()]),
@@ -391,6 +415,114 @@ mod test {
         assert_eq!(
             BTreeSet::from(["configured-skip".to_string()]),
             skipped_groups
+        );
+    }
+
+    fn group_action_container_with_exec_provider(
+        group: DoctorGroup,
+        exec_provider: MockExecutionProvider,
+    ) -> GroupActionContainer<DefaultDoctorActionRun> {
+        GroupActionContainer {
+            group,
+            actions: Vec::new(),
+            exec_provider: Arc::new(exec_provider),
+            exec_working_dir: PathBuf::from("/tmp"),
+            sys_path: "".to_string(),
+        }
+    }
+
+    fn transform_with_group(
+        name: &str,
+        group: DoctorGroup,
+        exec_provider: MockExecutionProvider,
+    ) -> RunTransform {
+        RunTransform {
+            groups: BTreeMap::from([(
+                name.to_string(),
+                group_action_container_with_exec_provider(group, exec_provider),
+            )]),
+            desired_groups: BTreeSet::from([name.to_string()]),
+            file_cache: Arc::new(NoOpCache::default()),
+            exec_runner: Arc::new(DefaultExecutionProvider::default()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_skips_evaluates_command_skip_config_at_planning_time() {
+        let group = make_root_model_additional(
+            vec![],
+            |meta| meta.name("command-skip"),
+            |g| {
+                g.skip(SkipSpec::Command {
+                    command: "should-skip".to_string(),
+                })
+            },
+        );
+
+        let mut mock_exec = MockExecutionProvider::new();
+        mock_exec.expect_run_command().times(1).returning(|_| {
+            Ok(OutputCaptureBuilder::default()
+                .command("should-skip".to_string())
+                .exit_code(Some(0))
+                .build()
+                .unwrap())
+        });
+
+        let mut fc = FoundConfig::empty(PathBuf::from("/tmp"));
+        fc.doctor_group
+            .insert("command-skip".to_string(), group.clone());
+        let transform = transform_with_group("command-skip", group, mock_exec);
+        let args = DoctorRunArgs {
+            no_cache: true,
+            ..Default::default()
+        };
+
+        let SkipResolution {
+            skip_subtree,
+            skipped_groups,
+            ..
+        } = resolve_skips(&fc, &transform, &args).await.unwrap();
+
+        assert_eq!(BTreeSet::from(["command-skip".to_string()]), skip_subtree);
+        assert_eq!(BTreeSet::from(["command-skip".to_string()]), skipped_groups);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_skips_does_not_run_own_skip_command_when_already_cli_skipped() {
+        // Regression test for a mutation-testing survivor: the `skip_subtree.contains(name)
+        // || skip_only.contains(name)` guard must short-circuit before evaluating a group's own
+        // `skip` command once that group is already excluded via `--skip`/`--skip-only` —
+        // otherwise a potentially expensive or side-effecting command runs needlessly for a
+        // group that was never going to execute.
+        let group = make_root_model_additional(
+            vec![],
+            |meta| meta.name("already-skipped"),
+            |g| {
+                g.skip(SkipSpec::Command {
+                    command: "should-not-run".to_string(),
+                })
+            },
+        );
+
+        let mut mock_exec = MockExecutionProvider::new();
+        mock_exec.expect_run_command().never();
+
+        let mut fc = FoundConfig::empty(PathBuf::from("/tmp"));
+        fc.doctor_group
+            .insert("already-skipped".to_string(), group.clone());
+        let transform = transform_with_group("already-skipped", group, mock_exec);
+        let args = DoctorRunArgs {
+            skip: Some(vec!["already-skipped".to_string()]),
+            no_cache: true,
+            ..Default::default()
+        };
+
+        let SkipResolution { skip_subtree, .. } =
+            resolve_skips(&fc, &transform, &args).await.unwrap();
+
+        assert_eq!(
+            BTreeSet::from(["already-skipped".to_string()]),
+            skip_subtree
         );
     }
 
@@ -414,7 +546,8 @@ mod test {
         };
 
         let transform = transform_inputs(&fc, &args);
-        let (_, _, skipped_groups) = resolve_skips(&fc, &transform, &args).await.unwrap();
+        let SkipResolution { skipped_groups, .. } =
+            resolve_skips(&fc, &transform, &args).await.unwrap();
 
         assert!(skipped_groups.is_empty());
     }
@@ -430,7 +563,8 @@ mod test {
 
         let transform = transform_inputs(&fc, &args);
         // Should not panic on a name that matches no group; it's simply a no-op.
-        let (_, _, skipped_groups) = resolve_skips(&fc, &transform, &args).await.unwrap();
+        let SkipResolution { skipped_groups, .. } =
+            resolve_skips(&fc, &transform, &args).await.unwrap();
 
         assert!(skipped_groups.is_empty());
     }
