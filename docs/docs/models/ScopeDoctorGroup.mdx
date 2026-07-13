@@ -73,6 +73,17 @@ In the event there are no defined check, the fix will _always_ run.
 When the checks determine that something isn't correct, a fix is the way to automate the resolution.
 When provided, `scope` will run them in order.
 
+## Skip
+
+`spec.skip` lets a group opt itself out of a run, either unconditionally (`skip: true`) or based
+on a command's exit code (`skip: { command: ... }`, skipped when the command exits `0`).
+
+The skip decision is resolved during planning, before the run graph is built, so it behaves the
+same as passing `--skip <name>` on the command line: the group is removed along with any
+dependency that isn't also required by another group still in the run. A shared dependency (one
+also required by a non-skipped group) is kept. The skipped group is still reported in the run
+summary; its dependencies that get trimmed along with it are not.
+
 ## Commands
 
 A command can either be relative, or use the PATH.

@@ -272,6 +272,83 @@ fn test_group_skip_subsequent_groups_run() {
 }
 
 #[test]
+fn test_group_skip_boolean_trims_dependency() {
+    let test_helper = ScopeTestHelper::new(
+        "test_group_skip_boolean_trims_dependency",
+        "group-skip-boolean-trims-dependency",
+    );
+    let result = test_helper.doctor_run(None);
+
+    result
+        .success()
+        .stdout(predicate::str::contains(
+            "Group skipped, group: \"skip-parent\"",
+        ))
+        .stdout(predicate::str::contains("should not run").not())
+        .stdout(predicate::str::contains("group: \"needs-dep\"").not())
+        .stdout(predicate::str::contains(
+            "Summary: 0 groups succeeded, 1 groups skipped",
+        ));
+
+    test_helper.clean_work_dir();
+}
+
+#[test]
+fn test_skip_flag_trims_exclusive_dependencies_but_keeps_shared_dependency() {
+    let test_helper = ScopeTestHelper::new(
+        "test_skip_flag_trims_exclusive_dependencies_but_keeps_shared_dependency",
+        "skip-with-deps",
+    );
+    let result = test_helper.doctor_run(Some(&["--skip=a"]));
+
+    result
+        .success()
+        .stdout(predicate::str::contains("Group skipped, group: \"a\""))
+        .stdout(predicate::str::contains("group: \"b\"").not())
+        .stdout(predicate::str::contains("group: \"c\"").not())
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"d\", name: \"check-d\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"shared\", name: \"check-shared\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Summary: 2 groups succeeded, 1 groups skipped",
+        ));
+
+    test_helper.clean_work_dir();
+}
+
+#[test]
+fn test_skip_only_flag_keeps_dependencies() {
+    let test_helper =
+        ScopeTestHelper::new("test_skip_only_flag_keeps_dependencies", "skip-with-deps");
+    let result = test_helper.doctor_run(Some(&["--skip-only=a"]));
+
+    result
+        .success()
+        .stdout(predicate::str::contains("Group skipped, group: \"a\""))
+        .stdout(predicate::str::contains("group: \"a\", name: \"check-a\"").not())
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"b\", name: \"check-b\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"c\", name: \"check-c\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"d\", name: \"check-d\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"shared\", name: \"check-shared\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Summary: 4 groups succeeded, 1 groups skipped",
+        ));
+
+    test_helper.clean_work_dir();
+}
+
+#[test]
 fn test_yolo_flag_auto_approves_fix_prompts() {
     let test_helper = ScopeTestHelper::new(
         "test_yolo_flag_auto_approves_fix_prompts",

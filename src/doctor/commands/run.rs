@@ -21,6 +21,15 @@ pub struct DoctorRunArgs {
     /// When set, only the checks listed will run
     #[arg(short, long)]
     pub only: Option<Vec<String>>,
+    /// When set, these groups are removed from the run, along with any dependency that isn't
+    /// also required by a group that's still included. This option can be provided multiple
+    /// times.
+    #[arg(long)]
+    pub skip: Option<Vec<String>>,
+    /// When set, only the named groups are removed from the run; their dependencies still run.
+    /// This option can be provided multiple times.
+    #[arg(long)]
+    pub skip_only: Option<Vec<String>>,
     /// When set, if a fix is specified it will also run.
     #[arg(long, short, default_value = "true")]
     fix: Option<bool>,
@@ -92,18 +101,80 @@ fn migrate_old_cache(old_path: &PathBuf, new_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Resolves the CLI `--skip`/`--skip-only` names plus each candidate group's own `skip` config
+/// (evaluated here, at planning time, so a `skip: true`/`skip: { command }` group can trim its
+/// dependency subtree the same way `--skip` does) into the final skip sets used to build the run
+/// order, along with the subset of those groups that would otherwise have run (for reporting).
+async fn resolve_skips(
+    found_config: &FoundConfig,
+    transform: &RunTransform,
+    args: &DoctorRunArgs,
+) -> Result<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)> {
+    let cli_skip: BTreeSet<String> = args.skip.clone().unwrap_or_default().into_iter().collect();
+    let skip_only: BTreeSet<String> = args
+        .skip_only
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    warn_on_unknown_group(found_config, &cli_skip, "--skip");
+    warn_on_unknown_group(found_config, &skip_only, "--skip-only");
+
+    let candidate_order = compute_group_order(
+        &found_config.doctor_group,
+        transform.desired_groups.clone(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+
+    let mut skip_subtree = cli_skip;
+    for name in &candidate_order {
+        if skip_subtree.contains(name) || skip_only.contains(name) {
+            continue;
+        }
+        if let Some(container) = transform.groups.get(name)
+            && container.should_skip_group().await?
+        {
+            skip_subtree.insert(name.clone());
+        }
+    }
+
+    let skipped_groups: BTreeSet<String> = candidate_order
+        .into_iter()
+        .filter(|name| skip_subtree.contains(name) || skip_only.contains(name))
+        .collect();
+
+    Ok((skip_subtree, skip_only, skipped_groups))
+}
+
+fn warn_on_unknown_group(found_config: &FoundConfig, names: &BTreeSet<String>, flag: &str) {
+    for name in names {
+        if !found_config.doctor_group.contains_key(name) {
+            warn!(target: "user", "{flag} {name} does not match any known group, ignoring");
+        }
+    }
+}
+
 #[instrument("scope doctor run", skip(found_config))]
 pub async fn doctor_run(found_config: &FoundConfig, args: &DoctorRunArgs) -> Result<i32> {
     let transform = transform_inputs(found_config, args);
+    let (skip_subtree, skip_only, skipped_groups) =
+        resolve_skips(found_config, &transform, args).await?;
 
-    let all_paths = compute_group_order(&found_config.doctor_group, transform.desired_groups);
-    if all_paths.is_empty() {
+    let all_paths = compute_group_order(
+        &found_config.doctor_group,
+        transform.desired_groups,
+        &skip_subtree,
+        &skip_only,
+    );
+    if all_paths.is_empty() && skipped_groups.is_empty() {
         warn!(target: "user", "Could not find any tasks to execute");
     }
 
     let run_groups = RunGroups {
         group_actions: transform.groups,
         all_paths,
+        skipped_groups,
         yolo: args.yolo,
     };
 
@@ -241,7 +312,7 @@ mod test {
     use crate::doctor::commands::DoctorRunArgs;
     use crate::doctor::commands::run::transform_inputs;
     use crate::doctor::tests::{group_noop, make_root_model_additional, meta_noop};
-    use crate::prelude::FoundConfig;
+    use crate::prelude::{FoundConfig, SkipSpec};
 
     #[test]
     fn test_will_include_by_default() {
@@ -261,6 +332,107 @@ mod test {
             BTreeSet::from(["included".to_string()]),
             transform.desired_groups
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_skips_cli_skip_trims_group_and_its_exclusive_dependency() {
+        let mut fc = FoundConfig::empty(PathBuf::from("/tmp"));
+        fc.doctor_group.insert(
+            "a".to_string(),
+            make_root_model_additional(
+                vec![],
+                |meta| meta.name("a"),
+                |g| g.requires(vec!["b".to_string()]),
+            ),
+        );
+        fc.doctor_group.insert(
+            "b".to_string(),
+            make_root_model_additional(vec![], |meta| meta.name("b"), |g| g.run_by_default(false)),
+        );
+        let args = DoctorRunArgs {
+            skip: Some(vec!["a".to_string()]),
+            no_cache: true,
+            ..Default::default()
+        };
+
+        let transform = transform_inputs(&fc, &args);
+        let (skip_subtree, skip_only, skipped_groups) =
+            resolve_skips(&fc, &transform, &args).await.unwrap();
+
+        assert_eq!(BTreeSet::from(["a".to_string()]), skip_subtree);
+        assert!(skip_only.is_empty());
+        assert_eq!(BTreeSet::from(["a".to_string()]), skipped_groups);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_skips_evaluates_group_skip_config_at_planning_time() {
+        let mut fc = FoundConfig::empty(PathBuf::from("/tmp"));
+        fc.doctor_group.insert(
+            "configured-skip".to_string(),
+            make_root_model_additional(
+                vec![],
+                |meta| meta.name("configured-skip"),
+                |g| g.skip(SkipSpec::Skip(true)),
+            ),
+        );
+        let args = DoctorRunArgs {
+            no_cache: true,
+            ..Default::default()
+        };
+
+        let transform = transform_inputs(&fc, &args);
+        let (skip_subtree, _, skipped_groups) =
+            resolve_skips(&fc, &transform, &args).await.unwrap();
+
+        assert_eq!(
+            BTreeSet::from(["configured-skip".to_string()]),
+            skip_subtree
+        );
+        assert_eq!(
+            BTreeSet::from(["configured-skip".to_string()]),
+            skipped_groups
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_skips_does_not_report_groups_that_would_not_have_run() {
+        let mut fc = FoundConfig::empty(PathBuf::from("/tmp"));
+        fc.doctor_group.insert(
+            "unreached".to_string(),
+            make_root_model_additional(
+                vec![],
+                |meta| meta.name("unreached"),
+                |g| g.run_by_default(false),
+            ),
+        );
+        let args = DoctorRunArgs {
+            // `unreached` isn't desired (run_by_default = false and nothing requires it), so
+            // skipping it shouldn't be reported even though the name is valid.
+            skip: Some(vec!["unreached".to_string()]),
+            no_cache: true,
+            ..Default::default()
+        };
+
+        let transform = transform_inputs(&fc, &args);
+        let (_, _, skipped_groups) = resolve_skips(&fc, &transform, &args).await.unwrap();
+
+        assert!(skipped_groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_skips_ignores_unknown_group_names() {
+        let fc = FoundConfig::empty(PathBuf::from("/tmp"));
+        let args = DoctorRunArgs {
+            skip: Some(vec!["does-not-exist".to_string()]),
+            no_cache: true,
+            ..Default::default()
+        };
+
+        let transform = transform_inputs(&fc, &args);
+        // Should not panic on a name that matches no group; it's simply a no-op.
+        let (_, _, skipped_groups) = resolve_skips(&fc, &transform, &args).await.unwrap();
+
+        assert!(skipped_groups.is_empty());
     }
 
     #[test]

@@ -28,7 +28,12 @@ pub fn generate_doctor_list(found_config: &FoundConfig) -> Vec<DoctorGroup> {
             .filter(|(_, v)| v.run_by_default)
             .map(|(k, _)| k.to_string()),
     );
-    let group_order = compute_group_order(&found_config.doctor_group, all_keys);
+    let group_order = compute_group_order(
+        &found_config.doctor_group,
+        all_keys,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
 
     group_order
         .iter()
