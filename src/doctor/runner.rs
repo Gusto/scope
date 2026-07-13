@@ -174,6 +174,10 @@ where
 {
     pub(crate) group_actions: BTreeMap<String, GroupActionContainer<T>>,
     pub(crate) all_paths: Vec<String>,
+    /// The full candidate order (topological, ignoring any skip decisions). Iterated instead of
+    /// `all_paths` purely so `skipped_groups` can be reported in their natural position in the
+    /// run rather than lumped together at the end.
+    pub(crate) full_order: Vec<String>,
     /// Groups trimmed from `all_paths` during planning (via `--skip`, `--skip-only`, or a
     /// group's own `skip` config) that would otherwise have run. Reported as skipped without
     /// ever being executed.
@@ -186,35 +190,11 @@ where
     T: DoctorActionRun,
 {
     pub async fn execute(&self) -> Result<PathRunResult> {
-        let mut full_path = Vec::new();
-        for path in &self.all_paths {
-            if let Some(group_container) = self.group_actions.get(path) {
-                full_path.push(group_container);
-            }
-        }
+        let runnable: BTreeSet<&str> = self.all_paths.iter().map(String::as_str).collect();
 
-        let mut run_result = self.run_path(full_path).await?;
-
-        for group_name in &self.skipped_groups {
-            debug_assert!(
-                !run_result.succeeded_groups.contains(group_name)
-                    && !run_result.failed_group.contains(group_name)
-                    && !run_result.skipped_group.contains(group_name),
-                "group {group_name} was both executed and planned-skipped"
-            );
-            warn!(target: "always", "Group skipped, group: \"{}\"", group_name);
-            run_result.skipped_group.insert(group_name.to_string());
-            run_result.group_reports.push(GroupReport::new(group_name));
-        }
-
-        Ok(run_result)
-    }
-
-    async fn run_path(&self, groups: Vec<&GroupActionContainer<T>>) -> Result<PathRunResult> {
         let header_span = info_span!("doctor run", "indicatif.pb_show" = true);
-        header_span.pb_set_length(self.all_paths.len() as u64);
+        header_span.pb_set_length((self.all_paths.len() + self.skipped_groups.len()) as u64);
         header_span.pb_set_message("scope doctor run");
-
         let _span = header_span.enter();
 
         let mut skip_remaining = false;
@@ -226,13 +206,34 @@ where
             group_reports: Vec::new(),
         };
 
-        for group_container in groups {
-            let group_name = group_container.group_name();
+        for group_name in &self.full_order {
+            if self.skipped_groups.contains(group_name) {
+                debug_assert!(
+                    !runnable.contains(group_name.as_str()),
+                    "group {group_name} is both runnable and planned-skipped"
+                );
+                header_span.pb_inc(1);
+                warn!(target: "always", "Group skipped, group: \"{}\"", group_name);
+                run_result.skipped_group.insert(group_name.clone());
+                run_result.group_reports.push(GroupReport::new(group_name));
+                continue;
+            }
+
+            if !runnable.contains(group_name.as_str()) {
+                // Transitively pruned as an exclusive dependency of a skipped group — nothing
+                // to report, it simply never appears in `all_paths`.
+                continue;
+            }
+
+            let Some(group_container) = self.group_actions.get(group_name) else {
+                continue;
+            };
+
             header_span.pb_inc(1);
             debug!(target: "user", "Running check {}", group_name);
 
             if skip_remaining {
-                run_result.skipped_group.insert(group_name.to_string());
+                run_result.skipped_group.insert(group_name.clone());
                 continue;
             }
 
@@ -240,7 +241,7 @@ where
                 parent: &header_span,
                 "group",
                 "indicatif.pb_show" = true,
-                "group.name" = group_name,
+                "group.name" = group_name.as_str(),
                 "otel.name" = format!("group {}", group_name)
             );
             group_span.pb_set_length(group_container.actions.len() as u64);
@@ -1042,13 +1043,15 @@ mod tests {
             make_group_action("group_3", make_action_runs(ActionRunStatus::CheckSucceeded)),
         ]);
 
+        let all_paths = vec![
+            "group_1".to_string(),
+            "group_2".to_string(),
+            "group_3".to_string(),
+        ];
         let run_groups = RunGroups {
             group_actions,
-            all_paths: vec![
-                "group_1".to_string(),
-                "group_2".to_string(),
-                "group_3".to_string(),
-            ],
+            full_order: all_paths.clone(),
+            all_paths,
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
@@ -1075,13 +1078,15 @@ mod tests {
             make_group_action("skipped_2", will_not_run()),
         ]);
 
+        let all_paths = vec![
+            "fails".to_string(),
+            "skipped_1".to_string(),
+            "skipped_2".to_string(),
+        ];
         let run_groups = RunGroups {
             group_actions,
-            all_paths: vec![
-                "fails".to_string(),
-                "skipped_1".to_string(),
-                "skipped_2".to_string(),
-            ],
+            full_order: all_paths.clone(),
+            all_paths,
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
@@ -1114,13 +1119,15 @@ mod tests {
             make_group_action("skipped", will_not_run()),
         ]);
 
+        let all_paths = vec![
+            "succeeds".to_string(),
+            "user_denies".to_string(),
+            "skipped".to_string(),
+        ];
         let run_groups = RunGroups {
             group_actions,
-            all_paths: vec![
-                "succeeds".to_string(),
-                "user_denies".to_string(),
-                "skipped".to_string(),
-            ],
+            full_order: all_paths.clone(),
+            all_paths,
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
@@ -1163,13 +1170,15 @@ mod tests {
             ),
         ]);
 
+        let all_paths = vec![
+            "succeeds_1".to_string(),
+            "user_denies".to_string(),
+            "succeeds_2".to_string(),
+        ];
         let run_groups = RunGroups {
             group_actions,
-            all_paths: vec![
-                "succeeds_1".to_string(),
-                "user_denies".to_string(),
-                "succeeds_2".to_string(),
-            ],
+            full_order: all_paths.clone(),
+            all_paths,
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
@@ -1208,13 +1217,15 @@ mod tests {
             ),
         ]);
 
+        let all_paths = vec![
+            "succeeds_1".to_string(),
+            "fails".to_string(),
+            "succeeds_2".to_string(),
+        ];
         let run_groups = RunGroups {
             group_actions,
-            all_paths: vec![
-                "succeeds_1".to_string(),
-                "fails".to_string(),
-                "succeeds_2".to_string(),
-            ],
+            full_order: all_paths.clone(),
+            all_paths,
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
@@ -1402,6 +1413,7 @@ mod tests {
         let run_groups = RunGroups {
             group_actions: BTreeMap::new(),
             all_paths: Vec::new(),
+            full_order: Vec::new(),
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
@@ -1417,15 +1429,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_reports_planned_skips_without_running_them() -> Result<()> {
-        let group_actions = BTreeMap::from([make_group_action(
-            "runs",
-            make_action_runs(ActionRunStatus::CheckSucceeded),
-        )]);
+    async fn test_execute_reports_planned_skips_in_their_natural_position() -> Result<()> {
+        let group_actions = BTreeMap::from([
+            make_group_action("before", make_action_runs(ActionRunStatus::CheckSucceeded)),
+            make_group_action("after", make_action_runs(ActionRunStatus::CheckSucceeded)),
+        ]);
 
+        // "trimmed" sits between "before" and "after" in the full candidate order, even though
+        // it's absent from `all_paths` — proving the skip warning interleaves at that position
+        // instead of being reported only after every runnable group has finished.
         let run_groups = RunGroups {
             group_actions,
-            all_paths: vec!["runs".to_string()],
+            all_paths: vec!["before".to_string(), "after".to_string()],
+            full_order: vec![
+                "before".to_string(),
+                "trimmed".to_string(),
+                "after".to_string(),
+            ],
             skipped_groups: BTreeSet::from(["trimmed".to_string()]),
             yolo: false,
         };
@@ -1435,7 +1455,7 @@ mod tests {
         // Groups trimmed during planning are reported as skipped without failing the run.
         assert!(exit_code.did_succeed);
         assert_eq!(
-            BTreeSet::from(["runs".to_string()]),
+            BTreeSet::from(["before".to_string(), "after".to_string()]),
             exit_code.succeeded_groups
         );
         assert_eq!(

@@ -103,12 +103,14 @@ fn migrate_old_cache(old_path: &PathBuf, new_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// The result of [`resolve_skips`]: the final skip sets used to build the run order, plus the
-/// subset of those groups that would otherwise have run (for reporting).
+/// The result of [`resolve_skips`]: the final skip sets used to build the run order, the subset
+/// of those groups that would otherwise have run (for reporting), and the full candidate order
+/// (ignoring skip decisions) so skipped groups can be reported in their natural position.
 struct SkipResolution {
     skip_subtree: BTreeSet<String>,
     skip_only: BTreeSet<String>,
     skipped_groups: BTreeSet<String>,
+    full_order: Vec<String>,
 }
 
 /// Resolves the CLI `--skip`/`--skip-only` names plus each candidate group's own `skip` config
@@ -149,14 +151,16 @@ async fn resolve_skips(
     }
 
     let skipped_groups: BTreeSet<String> = candidate_order
-        .into_iter()
-        .filter(|name| skip_subtree.contains(name) || skip_only.contains(name))
+        .iter()
+        .filter(|name| skip_subtree.contains(*name) || skip_only.contains(*name))
+        .cloned()
         .collect();
 
     Ok(SkipResolution {
         skip_subtree,
         skip_only,
         skipped_groups,
+        full_order: candidate_order,
     })
 }
 
@@ -175,6 +179,7 @@ pub async fn doctor_run(found_config: &FoundConfig, args: &DoctorRunArgs) -> Res
         skip_subtree,
         skip_only,
         skipped_groups,
+        full_order,
     } = resolve_skips(found_config, &transform, args).await?;
 
     let all_paths = compute_group_order(GroupOrderParams {
@@ -190,6 +195,7 @@ pub async fn doctor_run(found_config: &FoundConfig, args: &DoctorRunArgs) -> Res
     let run_groups = RunGroups {
         group_actions: transform.groups,
         all_paths,
+        full_order,
         skipped_groups,
         yolo: args.yolo,
     };
@@ -378,6 +384,7 @@ mod test {
             skip_subtree,
             skip_only,
             skipped_groups,
+            ..
         } = resolve_skips(&fc, &transform, &args).await.unwrap();
 
         assert_eq!(BTreeSet::from(["a".to_string()]), skip_subtree);
