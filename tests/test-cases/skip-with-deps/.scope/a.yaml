@@ -1,0 +1,17 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: a
+  description: Root group that depends on b (exclusive) and shared (also used by d)
+spec:
+  needs:
+    - b
+    - shared
+  actions:
+    - name: check-a
+      check:
+        commands:
+          - echo "checking a"
+      fix:
+        commands:
+          - echo "fixing a"

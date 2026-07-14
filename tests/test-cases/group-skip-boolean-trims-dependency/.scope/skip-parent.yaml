@@ -1,0 +1,10 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: skip-parent
+  description: Test group with skip boolean set to true and a dependency of its own
+spec:
+  skip: true
+  needs:
+    - needs-dep
+  actions: []

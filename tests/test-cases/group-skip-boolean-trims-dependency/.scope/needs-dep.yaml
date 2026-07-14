@@ -1,0 +1,15 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: needs-dep
+  description: Only required by skip-parent; should be trimmed along with it
+spec:
+  include: when-required
+  actions:
+    - name: should-not-run
+      check:
+        commands:
+          - echo "This check should not run"
+      fix:
+        commands:
+          - echo "This fix should not run"

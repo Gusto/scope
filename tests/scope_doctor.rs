@@ -150,6 +150,57 @@ fn test_no_tasks_found() {
 }
 
 #[test]
+fn test_no_tasks_warning_suppressed_when_everything_runnable_was_skipped() {
+    // Regression test for a mutation-testing survivor: `all_paths.is_empty() &&
+    // skipped_groups.is_empty()` must stay an `&&` — skipping every group that would otherwise
+    // have run is not the same as finding nothing to do, and shouldn't be reported as such.
+    let test_helper = ScopeTestHelper::new(
+        "test_no_tasks_warning_suppressed_when_everything_runnable_was_skipped",
+        "two-groups",
+    );
+    let result = test_helper.doctor_run(Some(&["--skip=group-one", "--skip=group-two"]));
+
+    result
+        .success()
+        .stdout(predicate::str::contains("Could not find any tasks to execute").not())
+        .stdout(predicate::str::contains(
+            "Group skipped, group: \"group-one\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Group skipped, group: \"group-two\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Summary: 0 groups succeeded, 2 groups skipped",
+        ));
+
+    test_helper.clean_work_dir();
+}
+
+#[test]
+fn test_skip_unknown_group_name_warns() {
+    let test_helper = ScopeTestHelper::new("test_skip_unknown_group_name_warns", "two-groups");
+    let result = test_helper.doctor_run(Some(&["--skip=does-not-exist"]));
+
+    result.success().stdout(predicate::str::contains(
+        "--skip does-not-exist does not match any known group, ignoring",
+    ));
+
+    test_helper.clean_work_dir();
+}
+
+#[test]
+fn test_skip_only_unknown_group_name_warns() {
+    let test_helper = ScopeTestHelper::new("test_skip_only_unknown_group_name_warns", "two-groups");
+    let result = test_helper.doctor_run(Some(&["--skip-only=does-not-exist"]));
+
+    result.success().stdout(predicate::str::contains(
+        "--skip-only does-not-exist does not match any known group, ignoring",
+    ));
+
+    test_helper.clean_work_dir();
+}
+
+#[test]
 fn test_sub_command_works() {
     let test_helper = ScopeTestHelper::new("test_sub_command_works", "command-paths");
     let result = test_helper.doctor_run(None);
@@ -266,6 +317,83 @@ fn test_group_skip_subsequent_groups_run() {
         ))
         .stdout(predicate::str::contains(
             "Summary: 2 groups succeeded, 1 groups skipped",
+        ));
+
+    test_helper.clean_work_dir();
+}
+
+#[test]
+fn test_group_skip_boolean_trims_dependency() {
+    let test_helper = ScopeTestHelper::new(
+        "test_group_skip_boolean_trims_dependency",
+        "group-skip-boolean-trims-dependency",
+    );
+    let result = test_helper.doctor_run(None);
+
+    result
+        .success()
+        .stdout(predicate::str::contains(
+            "Group skipped, group: \"skip-parent\"",
+        ))
+        .stdout(predicate::str::contains("should not run").not())
+        .stdout(predicate::str::contains("group: \"needs-dep\"").not())
+        .stdout(predicate::str::contains(
+            "Summary: 0 groups succeeded, 1 groups skipped",
+        ));
+
+    test_helper.clean_work_dir();
+}
+
+#[test]
+fn test_skip_flag_trims_exclusive_dependencies_but_keeps_shared_dependency() {
+    let test_helper = ScopeTestHelper::new(
+        "test_skip_flag_trims_exclusive_dependencies_but_keeps_shared_dependency",
+        "skip-with-deps",
+    );
+    let result = test_helper.doctor_run(Some(&["--skip=a"]));
+
+    result
+        .success()
+        .stdout(predicate::str::contains("Group skipped, group: \"a\""))
+        .stdout(predicate::str::contains("group: \"b\"").not())
+        .stdout(predicate::str::contains("group: \"c\"").not())
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"d\", name: \"check-d\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"shared\", name: \"check-shared\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Summary: 2 groups succeeded, 1 groups skipped",
+        ));
+
+    test_helper.clean_work_dir();
+}
+
+#[test]
+fn test_skip_only_flag_keeps_dependencies() {
+    let test_helper =
+        ScopeTestHelper::new("test_skip_only_flag_keeps_dependencies", "skip-with-deps");
+    let result = test_helper.doctor_run(Some(&["--skip-only=a"]));
+
+    result
+        .success()
+        .stdout(predicate::str::contains("Group skipped, group: \"a\""))
+        .stdout(predicate::str::contains("group: \"a\", name: \"check-a\"").not())
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"b\", name: \"check-b\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"c\", name: \"check-c\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"d\", name: \"check-d\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Check was successful, group: \"shared\", name: \"check-shared\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Summary: 4 groups succeeded, 1 groups skipped",
         ));
 
     test_helper.clean_work_dir();

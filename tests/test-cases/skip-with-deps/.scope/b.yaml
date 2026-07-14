@@ -1,0 +1,17 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: b
+  description: Only reachable through a; should be trimmed when a is skipped
+spec:
+  include: when-required
+  needs:
+    - c
+  actions:
+    - name: check-b
+      check:
+        commands:
+          - echo "checking b"
+      fix:
+        commands:
+          - echo "fixing b"
