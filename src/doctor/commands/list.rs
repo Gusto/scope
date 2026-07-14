@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::Args;
 use tracing::instrument;
 
-use crate::doctor::runner::compute_group_order;
+use crate::doctor::runner::{GroupOrderParams, compute_group_order};
 use crate::report_stdout;
 use crate::shared::prelude::{DoctorGroup, FoundConfig};
 use crate::shared::print_details;
@@ -28,7 +28,12 @@ pub fn generate_doctor_list(found_config: &FoundConfig) -> Vec<DoctorGroup> {
             .filter(|(_, v)| v.run_by_default)
             .map(|(k, _)| k.to_string()),
     );
-    let group_order = compute_group_order(&found_config.doctor_group, all_keys);
+    let group_order = compute_group_order(GroupOrderParams {
+        groups: &found_config.doctor_group,
+        desired_groups: &all_keys,
+        skip_subtree: &BTreeSet::new(),
+        skip_only: &BTreeSet::new(),
+    });
 
     group_order
         .iter()

@@ -1,0 +1,16 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: d
+  description: Independent root that also depends on shared
+spec:
+  needs:
+    - shared
+  actions:
+    - name: check-d
+      check:
+        commands:
+          - echo "checking d"
+      fix:
+        commands:
+          - echo "fixing d"

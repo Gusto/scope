@@ -1,0 +1,15 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: shared
+  description: Required by both a and d; must survive skipping a
+spec:
+  include: when-required
+  actions:
+    - name: check-shared
+      check:
+        commands:
+          - echo "checking shared"
+      fix:
+        commands:
+          - echo "fixing shared"
