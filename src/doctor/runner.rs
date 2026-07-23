@@ -78,11 +78,20 @@ impl PathRunResult {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum GroupExecutionStatus {
     Succeeded,
-    Failed,
     Skipped,
+    Failed,
+}
+
+impl GroupExecutionStatus {
+    /// Combine with a newly observed action status, keeping whichever is more
+    /// severe. Ensures a later successful action can't clear an earlier
+    /// failure/skip within the same group.
+    fn merge(self, other: Self) -> Self {
+        std::cmp::max(self, other)
+    }
 }
 
 #[derive(Debug)]
@@ -324,7 +333,7 @@ where
                 .await
                 .ok();
 
-            results.status = match action_result.status {
+            let action_status = match action_result.status {
                 ActionRunStatus::CheckSucceeded
                 | ActionRunStatus::NoCheckFixSucceeded
                 | ActionRunStatus::CheckFailedFixSucceedVerifySucceed => {
@@ -333,13 +342,26 @@ where
                 ActionRunStatus::CheckFailedFixUserDenied => GroupExecutionStatus::Skipped,
                 _ => GroupExecutionStatus::Failed,
             };
+            // Merge (worst-wins) rather than overwrite, so a later succeeding
+            // action can't clear an earlier failure/skip in the same group.
+            results.status = results.status.merge(action_status);
 
+            // Derived from `action_status` (rather than re-matching on
+            // `action_result.status`) so a newly added `ActionRunStatus` variant
+            // only needs classifying once, above, to affect both group status and
+            // halting — the two decisions can't silently diverge. Only the two
+            // exceptional cases below need to override that classification.
             results.skip_remaining = match action_result.status {
-                ActionRunStatus::CheckSucceeded
-                | ActionRunStatus::NoCheckFixSucceeded
-                | ActionRunStatus::CheckFailedFixSucceedVerifySucceed => false,
+                // --fix=false: a not-run fix should never halt the rest of the
+                // run, so every check gets a chance to report its status.
+                ActionRunStatus::CheckFailedNoRunFix => false,
                 ActionRunStatus::CheckFailedFixFailedStop => true,
-                _ => action.required(),
+                _ => match action_status {
+                    GroupExecutionStatus::Succeeded => false,
+                    GroupExecutionStatus::Skipped | GroupExecutionStatus::Failed => {
+                        action.required()
+                    }
+                },
             };
         }
 
@@ -409,7 +431,10 @@ where
                 .ok();
         }
         ActionRunStatus::CheckFailedNoRunFix => {
-            info!(target: "progress", group = group_name, name = action.name(), "Check failed, fix was not run");
+            warn!(target: "user", group = group_name, name = action.name(), "Check failed, fix was not run");
+            print_pretty_result(group_name, &action.name(), action_result)
+                .await
+                .ok();
         }
         ActionRunStatus::CheckFailedNoFixProvided => {
             error!(target: "user", group = group_name, name = action.name(), "Check failed, no fix provided");
@@ -1241,6 +1266,151 @@ mod tests {
             exit_code.failed_group
         );
         assert_eq!(BTreeSet::new(), exit_code.skipped_group);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_group_check_failed_fix_failed_stop_halts_remaining_actions() -> Result<()>
+    {
+        let mut actions = vec![make_action_run(
+            ActionRunStatus::CheckFailedFixFailedStop,
+            true,
+        )];
+        actions.extend(will_not_run());
+        let (_name, container) = make_group_action("fix-failed-stop", actions);
+        let run_groups = RunGroups {
+            group_actions: BTreeMap::new(),
+            all_paths: Vec::new(),
+            full_order: Vec::new(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        let group_span = info_span!("test_group", "indicatif.pb_show" = true);
+        let result = run_groups.execute_group(&group_span, &container).await?;
+
+        assert!(matches!(result.status, GroupExecutionStatus::Failed));
+        assert!(result.skip_remaining);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_group_check_failed_fix_failed_stop_halts_even_when_not_required()
+    -> Result<()> {
+        // `CheckFailedFixFailedStop` is an unconditional abort signal — a fix ran and
+        // failed catastrophically — so it must halt the group even when the action
+        // is `required: false`, unlike ordinary failures which only halt if required.
+        let mut actions = vec![make_action_run(
+            ActionRunStatus::CheckFailedFixFailedStop,
+            false,
+        )];
+        actions.extend(will_not_run());
+        let (_name, container) = make_group_action("fix-failed-stop-not-required", actions);
+        let run_groups = RunGroups {
+            group_actions: BTreeMap::new(),
+            all_paths: Vec::new(),
+            full_order: Vec::new(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        let group_span = info_span!("test_group", "indicatif.pb_show" = true);
+        let result = run_groups.execute_group(&group_span, &container).await?;
+
+        assert!(result.skip_remaining);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_group_check_failed_no_run_fix_does_not_skip_remaining_actions()
+    -> Result<()> {
+        let (_name, container) = make_group_action(
+            "fix-false",
+            vec![
+                make_action_run(ActionRunStatus::CheckFailedNoRunFix, true),
+                make_action_run(ActionRunStatus::CheckSucceeded, true),
+            ],
+        );
+        let run_groups = RunGroups {
+            group_actions: BTreeMap::new(),
+            all_paths: Vec::new(),
+            full_order: Vec::new(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        let group_span = info_span!("test_group", "indicatif.pb_show" = true);
+        let result = run_groups.execute_group(&group_span, &container).await?;
+
+        assert!(matches!(result.status, GroupExecutionStatus::Failed));
+        assert!(!result.skip_remaining);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_check_failed_no_run_fix_does_not_halt_dependent_groups() -> Result<()> {
+        let group_actions = BTreeMap::from([
+            make_group_action(
+                "fails",
+                make_action_runs(ActionRunStatus::CheckFailedNoRunFix),
+            ),
+            make_group_action(
+                "depends_on_fails",
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+        ]);
+
+        let all_paths = vec!["fails".to_string(), "depends_on_fails".to_string()];
+        let run_groups = RunGroups {
+            group_actions,
+            full_order: all_paths.clone(),
+            all_paths,
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        let exit_code = run_groups.execute().await?;
+        assert!(!exit_code.did_succeed);
+        assert_eq!(
+            BTreeSet::from(["depends_on_fails"].map(str::to_string)),
+            exit_code.succeeded_groups
+        );
+        assert_eq!(
+            BTreeSet::from(["fails"].map(str::to_string)),
+            exit_code.failed_group
+        );
+        assert_eq!(BTreeSet::new(), exit_code.skipped_group);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_group_status_is_sticky_once_failed() -> Result<()> {
+        // The first action fails but is `required: false`, so it doesn't halt the
+        // group; a later action in the same group then succeeds. The group must
+        // still be reported as failed overall — a later success must not clear an
+        // earlier failure.
+        let (_name, container) = make_group_action(
+            "mixed-results",
+            vec![
+                make_action_run(ActionRunStatus::CheckFailedFixSucceedVerifyFailed, false),
+                make_action_run(ActionRunStatus::CheckSucceeded, true),
+            ],
+        );
+        let run_groups = RunGroups {
+            group_actions: BTreeMap::new(),
+            all_paths: Vec::new(),
+            full_order: Vec::new(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        let group_span = info_span!("test_group", "indicatif.pb_show" = true);
+        let result = run_groups.execute_group(&group_span, &container).await?;
+
+        assert!(
+            matches!(result.status, GroupExecutionStatus::Failed),
+            "a later succeeding action must not clear an earlier failure"
+        );
         Ok(())
     }
 

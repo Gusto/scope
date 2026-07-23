@@ -400,6 +400,37 @@ fn test_skip_only_flag_keeps_dependencies() {
 }
 
 #[test]
+fn test_fix_false_runs_every_check_and_warns_on_unrun_fixes() {
+    // Regression test for https://github.com/Gusto/scope/issues/197: `--fix=false` used to
+    // stop at the first failing required check, hiding later checks/fixes from the user.
+    let test_helper = ScopeTestHelper::new(
+        "test_fix_false_runs_every_check_and_warns_on_unrun_fixes",
+        "fix-false",
+    );
+    let result = test_helper.doctor_run(Some(&["--fix=false", "--only=fix-false"]));
+
+    result
+        .failure()
+        .stdout(predicate::str::contains(
+            "INFO Check was successful, group: \"fix-false\", name: \"succeeds\"",
+        ))
+        .stdout(predicate::str::contains(
+            "WARN Check failed, fix was not run, group: \"fix-false\", name: \"run-always-not-required\"",
+        ))
+        .stdout(predicate::str::contains(
+            "WARN Check failed, fix was not run, group: \"fix-false\", name: \"run-always-required\"",
+        ))
+        .stdout(predicate::str::contains(
+            "INFO Check was successful, group: \"fix-false\", name: \"another-action\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Summary: 0 groups succeeded, 1 groups failed",
+        ));
+
+    test_helper.clean_work_dir();
+}
+
+#[test]
 fn test_yolo_flag_auto_approves_fix_prompts() {
     let test_helper = ScopeTestHelper::new(
         "test_yolo_flag_auto_approves_fix_prompts",
