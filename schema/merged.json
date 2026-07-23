@@ -217,7 +217,7 @@
       ]
     },
     "KnownErrorPattern": {
-      "description": "One or more regexes that determine whether a log line matches this known error.\nAccepts either a single pattern string or a list of pattern strings; a line matching\nany one of the patterns triggers the error.",
+      "description": "One or more regexes that determine whether a log line matches this known error.\nAccepts either a single pattern string or a list of pattern strings; a line matching\nany one of the patterns triggers the error.\n\nCapture groups in a matched pattern are available in `help` and in `fix`'s `commands` and\n`prompt`: a positional group like `(.*)` is substituted with `{{ captures[1] }}` (`captures[0]`\nis the whole match), and a named group like `(?<file>.*)` is substituted with `{{ file }}`.\nWhen multiple patterns are given, the first one that matches supplies the captures.",
       "anyOf": [
         {
           "description": "A single regex pattern.",
@@ -238,7 +238,7 @@
       "type": "object",
       "properties": {
         "fix": {
-          "description": "An optional fix the user will be prompted to run.",
+          "description": "An optional fix the user will be prompted to run. Its `commands` and `prompt` may\nreference `pattern`'s capture groups, e.g. `{{ captures[1] }}` or `{{ name }}` for a named\ngroup.",
           "anyOf": [
             {
               "$ref": "#/$defs/DoctorFixSpec"
@@ -249,7 +249,7 @@
           ]
         },
         "help": {
-          "description": "Text that the user can use to fix the issue",
+          "description": "Text that the user can use to fix the issue. May reference `pattern`'s capture groups,\ne.g. `{{ captures[1] }}` or `{{ name }}` for a named group.",
           "type": "string"
         },
         "pattern": {

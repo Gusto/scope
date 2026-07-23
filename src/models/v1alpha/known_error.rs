@@ -22,6 +22,11 @@ fn non_empty_string_list(generator: &mut schemars::generate::SchemaGenerator) ->
 /// One or more regexes that determine whether a log line matches this known error.
 /// Accepts either a single pattern string or a list of pattern strings; a line matching
 /// any one of the patterns triggers the error.
+///
+/// Capture groups in a matched pattern are available in `help` and in `fix`'s `commands` and
+/// `prompt`: a positional group like `(.*)` is substituted with `{{ captures[1] }}` (`captures[0]`
+/// is the whole match), and a named group like `(?<file>.*)` is substituted with `{{ file }}`.
+/// When multiple patterns are given, the first one that matches supplies the captures.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
 #[serde(untagged)]
 pub enum KnownErrorPattern {
@@ -46,7 +51,8 @@ impl KnownErrorPattern {
 #[serde(rename_all = "camelCase")]
 #[schemars(deny_unknown_fields)]
 pub struct KnownErrorSpec {
-    /// Text that the user can use to fix the issue
+    /// Text that the user can use to fix the issue. May reference `pattern`'s capture groups,
+    /// e.g. `{{ captures[1] }}` or `{{ name }}` for a named group.
     pub help: String,
 
     /// A regex (or list of regexes) used to determine if the line is an error.
@@ -54,7 +60,9 @@ pub struct KnownErrorSpec {
     /// pattern matches.
     pub pattern: KnownErrorPattern,
 
-    /// An optional fix the user will be prompted to run.
+    /// An optional fix the user will be prompted to run. Its `commands` and `prompt` may
+    /// reference `pattern`'s capture groups, e.g. `{{ captures[1] }}` or `{{ name }}` for a named
+    /// group.
     pub fix: Option<DoctorFixSpec>,
 }
 
@@ -121,6 +129,7 @@ impl InternalScopeModel<KnownErrorSpec, V1AlphaKnownError> for V1AlphaKnownError
         vec![
             "v1alpha/KnownError.yaml".to_string(),
             "v1alpha/KnownErrorMultiPattern.yaml".to_string(),
+            "v1alpha/KnownErrorWithCapture.yaml".to_string(),
         ]
     }
 }
