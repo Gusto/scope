@@ -1,0 +1,31 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: fix-false
+spec:
+  actions:
+    - name: succeeds
+      check:
+        commands:
+          - echo "succeeds"
+      fix:
+        commands:
+          - echo "fix ran"
+    - name: run-always-not-required
+      required: false
+      check: {}
+      fix:
+        commands:
+          - echo "this always runs but isn't critical"
+    - name: run-always-required
+      check: {}
+      fix:
+        commands:
+          - echo "this always runs but *is* critical"
+    - name: another-action
+      check:
+        commands:
+          - echo "another action"
+      fix:
+        commands:
+          - echo "this is another action"
