@@ -14,7 +14,9 @@ use petgraph::prelude::*;
 use petgraph::visit::{DfsPostOrder, Walker};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use tracing::{Instrument, Span, debug, error, info, info_span, warn};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
@@ -177,21 +179,137 @@ where
     }
 }
 
+/// The dependency DAG over a run's runnable groups (i.e. exactly the names in the topological
+/// `order` passed to [`RunGraph::new`]). An edge points from a dependent to a group it
+/// `requires`. Built once during planning and walked recursively during execution, so a
+/// dependent group's span is opened before — and therefore encloses — the spans of the groups
+/// it depends on (see issue #172: previously every group span was a sibling directly under
+/// `doctor run`, regardless of `requires`).
+///
+/// A "root" is a group no other group in the graph requires — these are the groups that parent
+/// directly to the top-level `doctor run` span. A group required by more than one other group
+/// (a diamond dependency) still appears once, nested under whichever dependent's subtree reaches
+/// it first during the walk.
+///
+/// Nodes are added in `order`, so `NodeIndex::index()` equals a node's position in `order` —
+/// [`RunGraph::roots`] and [`RunGraph::dependencies`] sort by that position so the recursive
+/// walk's group-by-group execution sequence matches `order` exactly (this is what preserves
+/// fail-fast and reporting behavior; see [`RunGroups::execute`]).
+pub(crate) struct RunGraph {
+    graph: DiGraph<String, ()>,
+    nodes: BTreeMap<String, NodeIndex>,
+}
+
+impl RunGraph {
+    /// Builds the graph over every name in `order`, adding an edge from each group to a
+    /// dependency named in its `requires` when that dependency is also present in `order`.
+    /// Dependencies not present in `order` (e.g. trimmed during planning) are simply omitted —
+    /// planning has already decided the final runnable set; this only reconstructs the shape of
+    /// the dependencies among it.
+    ///
+    /// This deliberately doesn't share code with [`build_dependency_graph`], the other
+    /// `requires`-to-`DiGraph` builder in this file: that one runs during planning, points
+    /// edges dependency-to-dependent, borrows `&str` node weights from `groups`, and warns on a
+    /// `requires` naming a group that doesn't exist at all. This one runs during execution,
+    /// points edges dependent-to-dependency (so [`RunGraph::roots`]/[`RunGraph::dependencies`]
+    /// read naturally), owns its `String` node weights, and treats a missing name as
+    /// unremarkable (it was legitimately trimmed by planning, e.g. via `--skip`) rather than as
+    /// a config error. If dependency-graph semantics change — most likely cycle detection, since
+    /// none exists today (see the fallback pass in [`RunGroups::execute`]) — check whether it
+    /// should apply to both.
+    pub(crate) fn new(order: &[String], groups: &BTreeMap<String, DoctorGroup>) -> Self {
+        let mut graph = DiGraph::<String, ()>::new();
+        let nodes: BTreeMap<String, NodeIndex> = order
+            .iter()
+            .map(|name| (name.clone(), graph.add_node(name.clone())))
+            .collect();
+
+        for name in order {
+            let Some(&this) = nodes.get(name) else {
+                continue;
+            };
+            let Some(model) = groups.get(name) else {
+                continue;
+            };
+            for dep in &model.requires {
+                if let Some(&dep_node) = nodes.get(dep) {
+                    graph.add_edge(this, dep_node, ());
+                }
+            }
+        }
+
+        Self { graph, nodes }
+    }
+
+    /// Groups no other group in the graph requires, ordered by their position in `order`.
+    fn roots(&self) -> Vec<NodeIndex> {
+        let mut roots: Vec<NodeIndex> = self
+            .graph
+            .node_indices()
+            .filter(|&node| {
+                self.graph
+                    .neighbors_directed(node, Direction::Incoming)
+                    .next()
+                    .is_none()
+            })
+            .collect();
+        roots.sort_by_key(|node| node.index());
+        roots
+    }
+
+    /// A group's dependencies present in the graph, ordered by their position in `order`.
+    fn dependencies(&self, node: NodeIndex) -> Vec<NodeIndex> {
+        let mut deps: Vec<NodeIndex> = self
+            .graph
+            .neighbors_directed(node, Direction::Outgoing)
+            .collect();
+        deps.sort_by_key(|node| node.index());
+        deps
+    }
+
+    fn name(&self, node: NodeIndex) -> &str {
+        &self.graph[node]
+    }
+
+    fn node(&self, name: &str) -> Option<NodeIndex> {
+        self.nodes.get(name).copied()
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.nodes.contains_key(name)
+    }
+
+    fn len(&self) -> usize {
+        self.graph.node_count()
+    }
+}
+
 pub struct RunGroups<T>
 where
     T: DoctorActionRun,
 {
     pub(crate) group_actions: BTreeMap<String, GroupActionContainer<T>>,
-    pub(crate) all_paths: Vec<String>,
+    pub(crate) graph: RunGraph,
     /// The full candidate order (topological, ignoring any skip decisions). Iterated instead of
-    /// `all_paths` purely so `skipped_groups` can be reported in their natural position in the
-    /// run rather than lumped together at the end.
+    /// `graph`'s nodes purely so `skipped_groups` can be reported in their natural position in
+    /// the run rather than lumped together at the end.
     pub(crate) full_order: Vec<String>,
-    /// Groups trimmed from `all_paths` during planning (via `--skip`, `--skip-only`, or a
-    /// group's own `skip` config) that would otherwise have run. Reported as skipped without
-    /// ever being executed.
+    /// Groups trimmed from the run during planning (via `--skip`, `--skip-only`, or a group's
+    /// own `skip` config) that would otherwise have run. Reported as skipped without ever being
+    /// executed.
     pub(crate) skipped_groups: BTreeSet<String>,
     pub(crate) yolo: bool,
+}
+
+/// Mutable state threaded through the whole recursive walk in [`RunGroups::run_group_subtree`].
+/// Unlike `parent_span` — which changes on every recursive call — these three keep the same
+/// identity for the entire walk; bundling them keeps the recursive function's signature from
+/// growing every time the walk needs to track something new, and avoids the
+/// `clippy::too_many_arguments` a fully-flattened parameter list would hit.
+struct WalkState {
+    visited: BTreeSet<NodeIndex>,
+    skip_remaining: bool,
+    run_result: PathRunResult,
 }
 
 impl<T> RunGroups<T>
@@ -199,65 +317,144 @@ where
     T: DoctorActionRun,
 {
     pub async fn execute(&self) -> Result<PathRunResult> {
-        let runnable: BTreeSet<&str> = self.all_paths.iter().map(String::as_str).collect();
-
         let header_span = info_span!("doctor run", "indicatif.pb_show" = true);
-        header_span.pb_set_length((self.all_paths.len() + self.skipped_groups.len()) as u64);
+        header_span.pb_set_length((self.graph.len() + self.skipped_groups.len()) as u64);
         header_span.pb_set_message("scope doctor run");
         let _span = header_span.enter();
 
-        let mut skip_remaining = false;
-        let mut run_result = PathRunResult {
-            did_succeed: true,
-            succeeded_groups: BTreeSet::new(),
-            failed_group: BTreeSet::new(),
-            skipped_group: BTreeSet::new(),
-            group_reports: Vec::new(),
+        let roots: BTreeSet<&str> = self
+            .graph
+            .roots()
+            .into_iter()
+            .map(|node| self.graph.name(node))
+            .collect();
+
+        let mut state = WalkState {
+            visited: BTreeSet::new(),
+            skip_remaining: false,
+            run_result: PathRunResult {
+                did_succeed: true,
+                succeeded_groups: BTreeSet::new(),
+                failed_group: BTreeSet::new(),
+                skipped_group: BTreeSet::new(),
+                group_reports: Vec::new(),
+            },
         };
 
         for group_name in &self.full_order {
             if self.skipped_groups.contains(group_name) {
                 debug_assert!(
-                    !runnable.contains(group_name.as_str()),
+                    !self.graph.contains(group_name),
                     "group {group_name} is both runnable and planned-skipped"
                 );
                 header_span.pb_inc(1);
                 warn!(target: "always", "Group skipped, group: \"{}\"", group_name);
-                run_result.skipped_group.insert(group_name.clone());
-                run_result.group_reports.push(GroupReport::new(group_name));
+                state.run_result.skipped_group.insert(group_name.clone());
+                state
+                    .run_result
+                    .group_reports
+                    .push(GroupReport::new(group_name));
                 continue;
             }
 
-            if !runnable.contains(group_name.as_str()) {
+            let Some(node) = self.graph.node(group_name) else {
                 // Transitively pruned as an exclusive dependency of a skipped group — nothing
-                // to report, it simply never appears in `all_paths`.
-                continue;
-            }
-
-            let Some(group_container) = self.group_actions.get(group_name) else {
+                // to report, it simply never appears in the graph.
                 continue;
             };
 
-            header_span.pb_inc(1);
-            debug!(target: "user", "Running check {}", group_name);
-
-            if skip_remaining {
-                run_result.skipped_group.insert(group_name.clone());
+            if !roots.contains(group_name.as_str()) {
+                // Not a root: it runs as part of a dependent's subtree, opened below.
                 continue;
             }
 
+            self.run_group_subtree(node, &header_span, &header_span, &mut state)
+                .await?;
+        }
+
+        // A `requires` cycle — nothing validates against this anywhere in the codebase — gives
+        // every member of the cycle an incoming edge, so `roots()` excludes all of them and the
+        // loop above never reaches them via recursion either (nothing outside the cycle points
+        // into it). Rather than silently dropping them from the run while still reporting
+        // success, execute whatever's left unvisited directly, nested under `doctor run` like a
+        // root — a cycle has no single "correct" dependent to nest it under anyway.
+        for group_name in &self.full_order {
+            let Some(node) = self.graph.node(group_name) else {
+                continue;
+            };
+            if state.visited.contains(&node) {
+                continue;
+            }
+            warn!(
+                target: "user",
+                "Group \"{}\" has a cyclic `requires` relationship and could not be nested under a dependent; running it directly",
+                group_name
+            );
+            self.run_group_subtree(node, &header_span, &header_span, &mut state)
+                .await?;
+        }
+
+        Ok(state.run_result)
+    }
+
+    /// Recursively runs `node`'s dependencies (nested under its own span, so that span
+    /// temporally encloses them), then runs `node` itself. Dependencies are visited in the same
+    /// relative order as `full_order`, and `state` is threaded through every call by mutable
+    /// reference, so the flattened "own turn" sequence produced by this walk, and the
+    /// fail-fast/reporting behavior driven by it, are identical to the previous flat,
+    /// non-nested traversal.
+    fn run_group_subtree<'a>(
+        &'a self,
+        node: NodeIndex,
+        parent_span: &'a Span,
+        header_span: &'a Span,
+        state: &'a mut WalkState,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        Box::pin(async move {
+            if state.visited.contains(&node) {
+                // Already ran as a dependency of an earlier-visited group (diamond dependency).
+                return Ok(());
+            }
+            state.visited.insert(node);
+
+            let group_name = self.graph.name(node).to_string();
+            let Some(container) = self.group_actions.get(&group_name) else {
+                // No action container for this name. Not reachable today — `group_actions` and
+                // `graph` are always built from the same source — but still visit this node's
+                // dependencies (nested under `parent_span`, since there's no group span of its
+                // own to nest them under) rather than silently orphaning them too.
+                for dep in self.graph.dependencies(node) {
+                    self.run_group_subtree(dep, parent_span, header_span, state)
+                        .await?;
+                }
+                return Ok(());
+            };
+
             let group_span = info_span!(
-                parent: &header_span,
+                parent: parent_span,
                 "group",
                 "indicatif.pb_show" = true,
                 "group.name" = group_name.as_str(),
                 "otel.name" = format!("group {}", group_name)
             );
-            group_span.pb_set_length(group_container.actions.len() as u64);
+            group_span.pb_set_length(container.actions.len() as u64);
             group_span.pb_set_message(&format!("group {group_name}"));
             let _span = group_span.enter();
 
-            let group_result = self.execute_group(&group_span, group_container).await?;
+            for dep in self.graph.dependencies(node) {
+                self.run_group_subtree(dep, &group_span, header_span, state)
+                    .await?;
+            }
+
+            header_span.pb_inc(1);
+            debug!(target: "user", "Running check {}", group_name);
+
+            if state.skip_remaining {
+                state.run_result.skipped_group.insert(group_name);
+                return Ok(());
+            }
+
+            let group_result = self.execute_group(&group_span, container).await?;
             if let GroupExecutionStatus::Failed = group_result.status {
                 group_span.set_status(Status::Error {
                     description: std::borrow::Cow::Owned(format!(
@@ -267,12 +464,11 @@ where
                 });
             }
 
-            run_result.process(&group_result);
+            state.run_result.process(&group_result);
+            state.skip_remaining |= group_result.skip_remaining;
 
-            skip_remaining |= group_result.skip_remaining;
-        }
-
-        Ok(run_result)
+            Ok(())
+        })
     }
 
     async fn execute_group(
@@ -684,9 +880,11 @@ mod tests {
     use crate::doctor::tests::{group_noop, make_root_model_additional};
     use crate::prelude::{ActionReport, ActionTaskReport, CaptureError, MockExecutionProvider};
     use anyhow::Result;
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::sync::{Arc, Mutex};
     use std::vec;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
     fn no_skip() -> BTreeSet<String> {
         BTreeSet::new()
@@ -1060,6 +1258,610 @@ mod tests {
         )
     }
 
+    /// A [`RunGraph`] over `names` with no dependency edges — every name is a root. Used by
+    /// tests that don't care about nesting, so they exercise the same "every group is
+    /// independent" shape the old flat `all_paths` traversal always produced.
+    fn flat_graph(names: &[String]) -> RunGraph {
+        RunGraph::new(names, &BTreeMap::new())
+    }
+
+    /// Builds a [`RunGraph`] over `order` using the `requires` already set on each entry in
+    /// `group_actions` — lets a test declare dependencies once, on the container, and have both
+    /// the graph and the execution use the same data instead of restating them separately.
+    fn graph_from<T: DoctorActionRun>(
+        order: &[&str],
+        group_actions: &BTreeMap<String, GroupActionContainer<T>>,
+    ) -> RunGraph {
+        let order: Vec<String> = order.iter().map(|s| s.to_string()).collect();
+        let groups: BTreeMap<String, DoctorGroup> = group_actions
+            .iter()
+            .map(|(name, container)| (name.clone(), container.group.clone()))
+            .collect();
+        RunGraph::new(&order, &groups)
+    }
+
+    fn make_group_action_requiring<T: DoctorActionRun>(
+        name: &str,
+        requires: Vec<&str>,
+        result: Vec<T>,
+    ) -> (String, GroupActionContainer<T>) {
+        let requires: Vec<String> = requires.into_iter().map(str::to_string).collect();
+        let test_group = make_root_model_additional(
+            vec![],
+            |meta| meta.name(name),
+            |group| group.requires(requires),
+        );
+
+        (
+            name.to_string(),
+            GroupActionContainer {
+                group: test_group,
+                actions: result,
+                exec_provider: Arc::new(MockExecutionProvider::new()),
+                exec_working_dir: Default::default(),
+                sys_path: "".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn test_run_graph_roots_and_dependencies_ordered_by_position() {
+        let mut groups = BTreeMap::new();
+        groups.insert(
+            "b".to_string(),
+            make_root_model_additional(vec![], |meta| meta.name("b"), group_noop),
+        );
+        groups.insert(
+            "a".to_string(),
+            make_root_model_additional(
+                vec![],
+                |meta| meta.name("a"),
+                |group| group.requires(vec!["b".to_string()]),
+            ),
+        );
+
+        let order = vec!["b".to_string(), "a".to_string()];
+        let graph = RunGraph::new(&order, &groups);
+
+        assert_eq!(2, graph.len());
+        assert!(graph.contains("a"));
+        assert!(!graph.contains("missing"));
+
+        let roots: Vec<&str> = graph.roots().into_iter().map(|n| graph.name(n)).collect();
+        assert_eq!(vec!["a"], roots, "only `a` isn't required by anything else");
+
+        let a = graph.node("a").expect("a is in the graph");
+        let deps: Vec<&str> = graph
+            .dependencies(a)
+            .into_iter()
+            .map(|n| graph.name(n))
+            .collect();
+        assert_eq!(vec!["b"], deps);
+    }
+
+    #[test]
+    fn test_run_graph_diamond_dependency_reachable_from_both_roots() {
+        let mut groups = BTreeMap::new();
+        groups.insert(
+            "s".to_string(),
+            make_root_model_additional(vec![], |meta| meta.name("s"), group_noop),
+        );
+        groups.insert(
+            "a".to_string(),
+            make_root_model_additional(
+                vec![],
+                |meta| meta.name("a"),
+                |group| group.requires(vec!["s".to_string()]),
+            ),
+        );
+        groups.insert(
+            "b".to_string(),
+            make_root_model_additional(
+                vec![],
+                |meta| meta.name("b"),
+                |group| group.requires(vec!["s".to_string()]),
+            ),
+        );
+
+        let order = vec!["s".to_string(), "a".to_string(), "b".to_string()];
+        let graph = RunGraph::new(&order, &groups);
+
+        let roots: Vec<&str> = graph.roots().into_iter().map(|n| graph.name(n)).collect();
+        assert_eq!(
+            vec!["a", "b"],
+            roots,
+            "`s` is required by both, so neither is a root"
+        );
+
+        let s = graph.node("s").expect("s is in the graph");
+        let a = graph.node("a").expect("a is in the graph");
+        let b = graph.node("b").expect("b is in the graph");
+        assert_eq!(vec![s], graph.dependencies(a));
+        assert_eq!(vec![s], graph.dependencies(b));
+    }
+
+    #[tokio::test]
+    async fn test_execute_shared_dependency_runs_once() -> Result<()> {
+        let mut shared_action = MockDoctorActionRun::new();
+        shared_action.expect_run_action().times(1).returning(|_| {
+            Ok(ActionRunResult::new(
+                "shared_action",
+                ActionRunStatus::CheckSucceeded,
+                None,
+                None,
+                None,
+            ))
+        });
+        shared_action.expect_help_text().return_const(None);
+        shared_action.expect_help_url().return_const(None);
+        shared_action
+            .expect_name()
+            .returning(|| "shared_action".to_string());
+        shared_action.expect_required().return_const(true);
+        shared_action
+            .expect_description()
+            .returning(|| "description".to_string());
+
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring("shared", vec![], vec![shared_action]),
+            make_group_action_requiring(
+                "a",
+                vec!["shared"],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+            make_group_action_requiring(
+                "b",
+                vec!["shared"],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+        ]);
+
+        let order = ["shared", "a", "b"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.iter().map(|s| s.to_string()).collect(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        let exit_code = execute_locked(&run_groups).await?;
+        assert!(exit_code.did_succeed);
+        assert_eq!(
+            BTreeSet::from(["shared", "a", "b"].map(str::to_string)),
+            exit_code.succeeded_groups
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_dependency_failure_skips_dependent() -> Result<()> {
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring(
+                "dep",
+                vec![],
+                make_action_runs(ActionRunStatus::CheckFailedFixSucceedVerifyFailed),
+            ),
+            make_group_action_requiring("dependent", vec!["dep"], will_not_run()),
+        ]);
+
+        let order = ["dep", "dependent"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.iter().map(|s| s.to_string()).collect(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        let exit_code = execute_locked(&run_groups).await?;
+        assert!(!exit_code.did_succeed);
+        assert_eq!(BTreeSet::from(["dep".to_string()]), exit_code.failed_group);
+        assert_eq!(
+            BTreeSet::from(["dependent".to_string()]),
+            exit_code.skipped_group
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_multi_root_forest_all_run() -> Result<()> {
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring(
+                "dep_1",
+                vec![],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+            make_group_action_requiring(
+                "root_1",
+                vec!["dep_1"],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+            make_group_action_requiring(
+                "dep_2",
+                vec![],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+            make_group_action_requiring(
+                "root_2",
+                vec!["dep_2"],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+        ]);
+
+        let order = ["dep_1", "root_1", "dep_2", "root_2"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.iter().map(|s| s.to_string()).collect(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        let exit_code = execute_locked(&run_groups).await?;
+        assert!(exit_code.did_succeed);
+        assert_eq!(
+            BTreeSet::from(["dep_1", "root_1", "dep_2", "root_2"].map(str::to_string)),
+            exit_code.succeeded_groups
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_fail_fast_across_subtrees() -> Result<()> {
+        // A failure in `root_1`'s subtree must halt `root_2`'s subtree too — fail-fast is
+        // global across the whole forest, not scoped to the failing root's own tree.
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring(
+                "dep_1",
+                vec![],
+                make_action_runs(ActionRunStatus::CheckFailedFixSucceedVerifyFailed),
+            ),
+            make_group_action_requiring("root_1", vec!["dep_1"], will_not_run()),
+            make_group_action_requiring("dep_2", vec![], will_not_run()),
+            make_group_action_requiring("root_2", vec!["dep_2"], will_not_run()),
+        ]);
+
+        let order = ["dep_1", "root_1", "dep_2", "root_2"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.iter().map(|s| s.to_string()).collect(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        let exit_code = execute_locked(&run_groups).await?;
+        assert!(!exit_code.did_succeed);
+        assert_eq!(
+            BTreeSet::from(["dep_1".to_string()]),
+            exit_code.failed_group
+        );
+        assert_eq!(
+            BTreeSet::from(["root_1", "dep_2", "root_2"].map(str::to_string)),
+            exit_code.skipped_group
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_cyclic_requires_still_runs_every_group() -> Result<()> {
+        // A cyclic `requires` relationship (nothing validates against this anywhere in the
+        // codebase) gives both `a` and `b` an incoming edge, so neither qualifies as a root and
+        // nothing outside the cycle recurses into them either. Without the fallback pass in
+        // `execute`, both would silently vanish from the run while `did_succeed` stayed true.
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring(
+                "a",
+                vec!["b"],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+            make_group_action_requiring(
+                "b",
+                vec!["a"],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+        ]);
+
+        let order = ["a", "b"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.iter().map(|s| s.to_string()).collect(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        let exit_code = execute_locked(&run_groups).await?;
+        assert!(exit_code.did_succeed);
+        assert_eq!(
+            BTreeSet::from(["a", "b"].map(str::to_string)),
+            exit_code.succeeded_groups,
+            "both groups in the cycle must still run, not silently vanish"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_missing_container_does_not_orphan_its_dependencies() -> Result<()> {
+        // `ghost` requires `dependency` and is present in the dependency graph, but has no
+        // entry in `group_actions`. Not reachable in production today — the graph and
+        // `group_actions` are always built from the same source — but `run_group_subtree` must
+        // still visit a missing node's dependencies rather than orphaning them.
+        let group_actions = BTreeMap::from([make_group_action_requiring(
+            "dependency",
+            vec![],
+            make_action_runs(ActionRunStatus::CheckSucceeded),
+        )]);
+
+        let mut groups_for_graph: BTreeMap<String, DoctorGroup> = group_actions
+            .iter()
+            .map(|(name, container)| (name.clone(), container.group.clone()))
+            .collect();
+        groups_for_graph.insert(
+            "ghost".to_string(),
+            make_root_model_additional(
+                vec![],
+                |meta| meta.name("ghost"),
+                |group| group.requires(vec!["dependency".to_string()]),
+            ),
+        );
+
+        let order = vec!["dependency".to_string(), "ghost".to_string()];
+        let graph = RunGraph::new(&order, &groups_for_graph);
+
+        let run_groups = RunGroups {
+            group_actions,
+            graph,
+            full_order: order,
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        let exit_code = execute_locked(&run_groups).await?;
+        assert!(exit_code.did_succeed);
+        assert_eq!(
+            BTreeSet::from(["dependency".to_string()]),
+            exit_code.succeeded_groups,
+            "`dependency` must still run even though its dependent `ghost` has no container"
+        );
+        Ok(())
+    }
+
+    /// `RunGroups::execute`/`execute_group` create `group`/`action`/`doctor run` spans at fixed
+    /// call sites in `run_group_subtree`/`execute_group`, shared by every test in this module.
+    /// `tracing`'s per-callsite interest cache is process-global and populated lazily: the first
+    /// time any of these call sites is ever hit, in *any* concurrently-running test on *any*
+    /// thread, its interest gets computed against whichever dispatcher that thread happens to
+    /// have active (which, for a test with no custom subscriber, is the ambient no-op default)
+    /// and then stays cached — including for tests that install their own subscriber
+    /// afterward, like [`SpanCapture`]'s. So every test that exercises these call sites has to
+    /// serialize against every other one, not just against tests that also capture spans;
+    /// otherwise span capture is flaky depending on test scheduling. Call [`execute_locked`]
+    /// / [`execute_group_locked`] instead of `RunGroups::execute`/`execute_group` directly.
+    ///
+    /// A `tokio::sync::Mutex` (rather than `std::sync::Mutex`) because the guard has to stay
+    /// held across the `.await` — that's the whole point, the callsites are hit *during* it.
+    static SPAN_CALLSITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn execute_locked<T: DoctorActionRun>(
+        run_groups: &RunGroups<T>,
+    ) -> Result<PathRunResult> {
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        run_groups.execute().await
+    }
+
+    async fn execute_group_locked<T: DoctorActionRun>(
+        run_groups: &RunGroups<T>,
+        group_span: &Span,
+        container: &GroupActionContainer<T>,
+    ) -> Result<GroupExecutionResult> {
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        run_groups.execute_group(group_span, container).await
+    }
+
+    /// Records each span's identity (its static macro name, plus the `group.name` field when
+    /// present — this distinguishes a `group` span from the `action` spans nested under it,
+    /// which also carry `group.name`) and its parent's identity, in creation order. There's no
+    /// existing tracing test harness in this codebase, and this is the only way to prove group
+    /// spans nest under their dependent's span rather than always under `doctor run` (issue
+    /// #172) — the property under test simply isn't observable from `RunGroups::execute`'s
+    /// return value.
+    /// (child identity, parent identity) pairs, in creation order.
+    type SpanEdges = Vec<(String, Option<String>)>;
+
+    #[derive(Default, Clone)]
+    struct SpanCapture {
+        names: Arc<Mutex<HashMap<u64, String>>>,
+        edges: Arc<Mutex<SpanEdges>>,
+    }
+
+    impl SpanCapture {
+        fn edges(&self) -> SpanEdges {
+            self.edges.lock().unwrap().clone()
+        }
+
+        fn parent_of(&self, identity: &str) -> Option<String> {
+            self.edges()
+                .into_iter()
+                .find(|(name, _)| name == identity)
+                .and_then(|(_, parent)| parent)
+        }
+    }
+
+    #[derive(Default)]
+    struct GroupNameVisitor(Option<String>);
+
+    impl Visit for GroupNameVisitor {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "group.name" {
+                self.0 = Some(value.to_string());
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "group.name" && self.0.is_none() {
+                self.0 = Some(format!("{value:?}"));
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for SpanCapture {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::span::Id,
+            _ctx: Context<'_, S>,
+        ) {
+            let mut visitor = GroupNameVisitor::default();
+            attrs.record(&mut visitor);
+            let identity = match visitor.0 {
+                Some(group_name) => format!("{}:{group_name}", attrs.metadata().name()),
+                None => attrs.metadata().name().to_string(),
+            };
+
+            let parent_identity = attrs.parent().and_then(|parent_id| {
+                self.names
+                    .lock()
+                    .unwrap()
+                    .get(&parent_id.into_u64())
+                    .cloned()
+            });
+
+            self.names
+                .lock()
+                .unwrap()
+                .insert(id.into_u64(), identity.clone());
+            self.edges.lock().unwrap().push((identity, parent_identity));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_nests_dependency_span_under_dependent_span() -> Result<()> {
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring(
+                "dep",
+                vec![],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+            make_group_action_requiring(
+                "root",
+                vec!["dep"],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+        ]);
+
+        let order = ["dep", "root"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.iter().map(|s| s.to_string()).collect(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        // Hold the same lock `execute_locked`/`execute_group_locked` use, for the entire window
+        // from installing the subscriber through the run completing — not just via
+        // `execute_locked` — so no other test's dispatch can be active when these call sites
+        // get their (process-global) interest computed. Call `execute()` directly rather than
+        // through `execute_locked`, which would try to take this same non-reentrant lock again.
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let capture = SpanCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+
+        let exit_code = run_groups.execute().await?;
+        assert!(exit_code.did_succeed);
+
+        assert_eq!(
+            Some("doctor run".to_string()),
+            capture.parent_of("group:root"),
+            "`root` has nothing depending on it, so it parents directly to the header span"
+        );
+        assert_eq!(
+            Some("group:root".to_string()),
+            capture.parent_of("group:dep"),
+            "`dep`'s span must nest under its dependent `root`'s span, not the header span \
+             (issue #172)"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_diamond_dependency_span_nests_under_first_dependent_only() -> Result<()> {
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring(
+                "shared",
+                vec![],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+            make_group_action_requiring(
+                "a",
+                vec!["shared"],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+            make_group_action_requiring(
+                "b",
+                vec!["shared"],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+        ]);
+
+        let order = ["shared", "a", "b"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.iter().map(|s| s.to_string()).collect(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+
+        // Hold the same lock `execute_locked`/`execute_group_locked` use, for the entire window
+        // from installing the subscriber through the run completing — not just via
+        // `execute_locked` — so no other test's dispatch can be active when these call sites
+        // get their (process-global) interest computed. Call `execute()` directly rather than
+        // through `execute_locked`, which would try to take this same non-reentrant lock again.
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let capture = SpanCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+
+        let exit_code = run_groups.execute().await?;
+        assert!(exit_code.did_succeed);
+
+        let shared_spans: Vec<_> = capture
+            .edges()
+            .into_iter()
+            .filter(|(name, _)| name == "group:shared")
+            .collect();
+        assert_eq!(
+            1,
+            shared_spans.len(),
+            "the shared dependency's span must be opened exactly once"
+        );
+        assert_eq!(
+            Some("group:a".to_string()),
+            shared_spans[0].1.clone(),
+            "the shared dep nests under the first dependent (`a`) to reach it, not `b`"
+        );
+
+        assert_eq!(
+            Some("doctor run".to_string()),
+            capture.parent_of("group:a"),
+            "`a` is a root"
+        );
+        assert_eq!(
+            Some("doctor run".to_string()),
+            capture.parent_of("group:b"),
+            "`b` is a root too"
+        );
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_execute_run_with_multiple_paths_only_run_group_once() -> Result<()> {
         let group_actions = BTreeMap::from([
@@ -1075,18 +1877,15 @@ mod tests {
         ];
         let run_groups = RunGroups {
             group_actions,
+            graph: flat_graph(&all_paths),
             full_order: all_paths.clone(),
-            all_paths,
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
 
-        let exit_code = run_groups.execute().await?;
+        let exit_code = execute_locked(&run_groups).await?;
         assert!(exit_code.did_succeed);
-        assert_eq!(
-            BTreeSet::from_iter(run_groups.all_paths),
-            exit_code.succeeded_groups
-        );
+        assert_eq!(BTreeSet::from_iter(all_paths), exit_code.succeeded_groups);
         assert_eq!(BTreeSet::new(), exit_code.failed_group);
         assert_eq!(BTreeSet::new(), exit_code.skipped_group);
         Ok(())
@@ -1110,13 +1909,13 @@ mod tests {
         ];
         let run_groups = RunGroups {
             group_actions,
-            full_order: all_paths.clone(),
-            all_paths,
+            graph: flat_graph(&all_paths),
+            full_order: all_paths,
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
 
-        let exit_code = run_groups.execute().await?;
+        let exit_code = execute_locked(&run_groups).await?;
         assert!(!exit_code.did_succeed);
         assert_eq!(BTreeSet::new(), exit_code.succeeded_groups);
         assert_eq!(
@@ -1151,13 +1950,13 @@ mod tests {
         ];
         let run_groups = RunGroups {
             group_actions,
-            full_order: all_paths.clone(),
-            all_paths,
+            graph: flat_graph(&all_paths),
+            full_order: all_paths,
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
 
-        let exit_code = run_groups.execute().await?;
+        let exit_code = execute_locked(&run_groups).await?;
         assert!(!exit_code.did_succeed);
 
         assert_eq!(
@@ -1202,13 +2001,13 @@ mod tests {
         ];
         let run_groups = RunGroups {
             group_actions,
-            full_order: all_paths.clone(),
-            all_paths,
+            graph: flat_graph(&all_paths),
+            full_order: all_paths,
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
 
-        let exit_code = run_groups.execute().await?;
+        let exit_code = execute_locked(&run_groups).await?;
         assert!(!exit_code.did_succeed);
         assert_eq!(
             BTreeSet::from(["succeeds_1", "succeeds_2"].map(str::to_string)),
@@ -1249,13 +2048,13 @@ mod tests {
         ];
         let run_groups = RunGroups {
             group_actions,
-            full_order: all_paths.clone(),
-            all_paths,
+            graph: flat_graph(&all_paths),
+            full_order: all_paths,
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
 
-        let exit_code = run_groups.execute().await?;
+        let exit_code = execute_locked(&run_groups).await?;
         assert!(!exit_code.did_succeed);
         assert_eq!(
             BTreeSet::from(["succeeds_1", "succeeds_2"].map(str::to_string)),
@@ -1280,14 +2079,14 @@ mod tests {
         let (_name, container) = make_group_action("fix-failed-stop", actions);
         let run_groups = RunGroups {
             group_actions: BTreeMap::new(),
-            all_paths: Vec::new(),
+            graph: flat_graph(&[]),
             full_order: Vec::new(),
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
 
         let group_span = info_span!("test_group", "indicatif.pb_show" = true);
-        let result = run_groups.execute_group(&group_span, &container).await?;
+        let result = execute_group_locked(&run_groups, &group_span, &container).await?;
 
         assert!(matches!(result.status, GroupExecutionStatus::Failed));
         assert!(result.skip_remaining);
@@ -1308,14 +2107,14 @@ mod tests {
         let (_name, container) = make_group_action("fix-failed-stop-not-required", actions);
         let run_groups = RunGroups {
             group_actions: BTreeMap::new(),
-            all_paths: Vec::new(),
+            graph: flat_graph(&[]),
             full_order: Vec::new(),
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
 
         let group_span = info_span!("test_group", "indicatif.pb_show" = true);
-        let result = run_groups.execute_group(&group_span, &container).await?;
+        let result = execute_group_locked(&run_groups, &group_span, &container).await?;
 
         assert!(result.skip_remaining);
         Ok(())
@@ -1333,14 +2132,14 @@ mod tests {
         );
         let run_groups = RunGroups {
             group_actions: BTreeMap::new(),
-            all_paths: Vec::new(),
+            graph: flat_graph(&[]),
             full_order: Vec::new(),
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
 
         let group_span = info_span!("test_group", "indicatif.pb_show" = true);
-        let result = run_groups.execute_group(&group_span, &container).await?;
+        let result = execute_group_locked(&run_groups, &group_span, &container).await?;
 
         assert!(matches!(result.status, GroupExecutionStatus::Failed));
         assert!(!result.skip_remaining);
@@ -1363,13 +2162,13 @@ mod tests {
         let all_paths = vec!["fails".to_string(), "depends_on_fails".to_string()];
         let run_groups = RunGroups {
             group_actions,
-            full_order: all_paths.clone(),
-            all_paths,
+            graph: flat_graph(&all_paths),
+            full_order: all_paths,
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
 
-        let exit_code = run_groups.execute().await?;
+        let exit_code = execute_locked(&run_groups).await?;
         assert!(!exit_code.did_succeed);
         assert_eq!(
             BTreeSet::from(["depends_on_fails"].map(str::to_string)),
@@ -1398,14 +2197,14 @@ mod tests {
         );
         let run_groups = RunGroups {
             group_actions: BTreeMap::new(),
-            all_paths: Vec::new(),
+            graph: flat_graph(&[]),
             full_order: Vec::new(),
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
 
         let group_span = info_span!("test_group", "indicatif.pb_show" = true);
-        let result = run_groups.execute_group(&group_span, &container).await?;
+        let result = execute_group_locked(&run_groups, &group_span, &container).await?;
 
         assert!(
             matches!(result.status, GroupExecutionStatus::Failed),
@@ -1612,14 +2411,14 @@ mod tests {
 
         let run_groups = RunGroups {
             group_actions: BTreeMap::new(),
-            all_paths: Vec::new(),
+            graph: flat_graph(&[]),
             full_order: Vec::new(),
             skipped_groups: BTreeSet::new(),
             yolo: false,
         };
 
         let group_span = info_span!("test_group", "indicatif.pb_show" = true);
-        let result = run_groups.execute_group(&group_span, &container).await?;
+        let result = execute_group_locked(&run_groups, &group_span, &container).await?;
 
         assert_eq!(result.group_name, "test-group");
         assert!(matches!(result.status, GroupExecutionStatus::Succeeded));
@@ -1636,11 +2435,11 @@ mod tests {
         ]);
 
         // "trimmed" sits between "before" and "after" in the full candidate order, even though
-        // it's absent from `all_paths` — proving the skip warning interleaves at that position
+        // it's absent from the graph — proving the skip warning interleaves at that position
         // instead of being reported only after every runnable group has finished.
         let run_groups = RunGroups {
             group_actions,
-            all_paths: vec!["before".to_string(), "after".to_string()],
+            graph: flat_graph(&["before".to_string(), "after".to_string()]),
             full_order: vec![
                 "before".to_string(),
                 "trimmed".to_string(),
@@ -1650,7 +2449,7 @@ mod tests {
             yolo: false,
         };
 
-        let exit_code = run_groups.execute().await?;
+        let exit_code = execute_locked(&run_groups).await?;
 
         // Groups trimmed during planning are reported as skipped without failing the run.
         assert!(exit_code.did_succeed);

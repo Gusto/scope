@@ -9,7 +9,7 @@ use tracing::{info, instrument, warn};
 use crate::doctor::check::{DefaultDoctorActionRun, DefaultGlobWalker};
 use crate::doctor::file_cache::{FileBasedCache, FileCache, NoOpCache};
 use crate::doctor::runner::{
-    GroupActionContainer, GroupOrderParams, RunGroups, compute_group_order,
+    GroupActionContainer, GroupOrderParams, RunGraph, RunGroups, compute_group_order,
 };
 use crate::prelude::{
     DefaultGroupedReportBuilder, ExecutionProvider, GroupedReportBuilder, ReportRenderer,
@@ -192,9 +192,10 @@ pub async fn doctor_run(found_config: &FoundConfig, args: &DoctorRunArgs) -> Res
         warn!(target: "user", "Could not find any tasks to execute");
     }
 
+    let graph = RunGraph::new(&all_paths, &found_config.doctor_group);
     let run_groups = RunGroups {
         group_actions: transform.groups,
-        all_paths,
+        graph,
         full_order,
         skipped_groups,
         yolo: args.yolo,
