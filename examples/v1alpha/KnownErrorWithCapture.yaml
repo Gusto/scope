@@ -1,0 +1,13 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeKnownError
+metadata:
+  name: not-executable
+  description: Detects a permission-denied error and makes the named file executable
+spec:
+  pattern: "permission denied: \\./(?<file>.*)"
+  help: "The file '{{ file }}' is not executable. Run `chmod +x {{ file }}` and try again."
+  fix:
+    prompt:
+      text: "Make '{{ file }}' executable?"
+    commands:
+      - chmod +x {{ file }}

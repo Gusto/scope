@@ -2,7 +2,7 @@ use anyhow::Result;
 use derive_builder::Builder;
 use std::path::Path;
 
-use super::{extract_command_path, substitute_templates};
+use super::{RegexCaptures, extract_command_path, substitute_templates_with_captures};
 
 #[derive(Debug, PartialEq, Clone, Builder)]
 pub struct DoctorCommand {
@@ -11,7 +11,23 @@ pub struct DoctorCommand {
 
 impl DoctorCommand {
     pub fn try_new(containing_dir: &Path, working_dir: &str, command: &str) -> Result<Self> {
-        let cmd = substitute_templates(working_dir, command)?;
+        Self::try_new_with_captures(
+            containing_dir,
+            working_dir,
+            command,
+            &RegexCaptures::default(),
+        )
+    }
+
+    /// Like `try_new`, but also substitutes regex capture groups (e.g. `{{ captures[1] }}` or
+    /// `{{ name }}` for a named group) matched from a `ScopeKnownError` pattern.
+    pub fn try_new_with_captures(
+        containing_dir: &Path,
+        working_dir: &str,
+        command: &str,
+        captures: &RegexCaptures,
+    ) -> Result<Self> {
+        let cmd = substitute_templates_with_captures(working_dir, command, captures)?;
         let cmd = extract_command_path(containing_dir, &cmd);
         let cmd = Self::expand_command(&cmd);
         Ok(DoctorCommand::from_str(&cmd))
@@ -57,9 +73,27 @@ impl DoctorCommands {
         working_dir: &str,
         commands: &[String],
     ) -> Result<DoctorCommands> {
+        Self::from_commands_with_captures(
+            containing_dir,
+            working_dir,
+            commands,
+            &RegexCaptures::default(),
+        )
+    }
+
+    /// Like `from_commands`, but also substitutes regex capture groups matched from a
+    /// `ScopeKnownError` pattern into each command.
+    pub fn from_commands_with_captures(
+        containing_dir: &Path,
+        working_dir: &str,
+        commands: &[String],
+        captures: &RegexCaptures,
+    ) -> Result<DoctorCommands> {
         commands
             .iter()
-            .map(|command| DoctorCommand::try_new(containing_dir, working_dir, command))
+            .map(|command| {
+                DoctorCommand::try_new_with_captures(containing_dir, working_dir, command, captures)
+            })
             .collect::<Result<Vec<_>>>()
             .map(|commands| DoctorCommands { commands })
     }

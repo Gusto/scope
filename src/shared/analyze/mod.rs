@@ -1,12 +1,12 @@
 use crate::models::HelpMetadata;
 use crate::prelude::{
     CaptureOpts, DefaultExecutionProvider, DoctorFix, ExecutionProvider, KnownError, OutputCapture,
-    OutputDisplay, generate_env_vars,
+    OutputDisplay, generate_env_vars, substitute_templates_with_captures,
 };
 use anyhow::Result;
 use inquire::InquireError;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncRead};
 use tracing::{debug, error, info, warn};
 
@@ -34,17 +34,46 @@ where
         let mut known_errors_to_remove = Vec::new();
         for (name, ke) in &known_errors {
             debug!("Checking known error {}", ke.name());
-            if ke.regexes.is_match(&line) {
+            if let Some(captures) = ke.find_match(&line) {
                 warn!(target: "always", "Known error '{}' found on line {}", ke.name(), line_number);
-                info!(target: "always", "\t==> {}", ke.help_text);
+
+                let ke_working_dir = ke
+                    .metadata
+                    .annotations
+                    .working_dir
+                    .as_ref()
+                    .expect("known error metadata should have a working_dir");
+                // Help text predates capture substitution and may contain brace-like literal
+                // text that isn't valid template syntax; fall back to the raw text rather than
+                // aborting the run over a cosmetic rendering failure.
+                let help_text =
+                    substitute_templates_with_captures(ke_working_dir, &ke.help_text, &captures)
+                        .unwrap_or_else(|err| {
+                            debug!(
+                                "Failed to render help text for known error '{}': {}",
+                                ke.name(),
+                                err
+                            );
+                            ke.help_text.clone()
+                        });
+                info!(target: "always", "\t==> {}", help_text);
 
                 result = match &ke.fix {
-                    Some(fix) => {
+                    Some(fix_spec) => {
                         info!(target: "always", "found a fix!");
+
+                        let containing_dir_string = ke.metadata.containing_dir();
+                        let containing_dir = Path::new(&containing_dir_string);
+                        let fix = DoctorFix::from_spec_with_captures(
+                            containing_dir,
+                            ke_working_dir,
+                            fix_spec.clone(),
+                            &captures,
+                        )?;
 
                         tracing_indicatif::suspend_tracing_indicatif(|| {
                             let exec_path = ke.metadata.exec_path();
-                            prompt_and_run_fix(working_dir, exec_path, fix, yolo)
+                            prompt_and_run_fix(working_dir, exec_path, &fix, yolo)
                         })
                         .await?
                     }

@@ -82,6 +82,56 @@ fn test_intercept_fix_succeeds_retry_fails() {
     helper.clean_work_dir();
 }
 
+// A fix with multiple commands must stop running commands after the first one fails,
+// rather than continuing through the rest of the list.
+#[test]
+fn test_intercept_fix_stops_after_first_command_fails() {
+    let helper = ScopeTestHelper::new(
+        "test_intercept_fix_stops_after_first_command_fails",
+        "intercept-known-error-multi-command-fix",
+    );
+
+    helper
+        .intercept_command(&[
+            "--yolo",
+            "--",
+            "bash",
+            "-c",
+            "echo 'trigger-multi-command-fix'; exit 1",
+        ])
+        .failure()
+        .stdout(predicate::str::contains(
+            "Known error 'multi-command-fix' found",
+        ))
+        .stdout(predicate::str::contains("SECOND_COMMAND_RAN").not());
+
+    helper.clean_work_dir();
+}
+
+// The pattern captures the missing filename from `cat`'s own error message and the fix
+// creates that exact file, proving the fix isn't hardcoded to one filename.
+#[test]
+fn test_intercept_fix_uses_captured_regex_group() {
+    let helper = ScopeTestHelper::new(
+        "test_intercept_fix_uses_captured_regex_group",
+        "intercept-known-error-capture",
+    );
+
+    helper
+        .intercept_command(&["--yolo", "cat", "wanted-name.txt"])
+        .success()
+        .stdout(predicate::str::contains(
+            "Known error 'missing-captured-file' found",
+        ))
+        .stdout(predicate::str::contains(
+            "The file 'wanted-name.txt' does not exist. Creating it now.",
+        ))
+        .stdout(predicate::str::contains("Fix succeeded, retrying command"))
+        .stdout(predicate::str::contains("ready"));
+
+    helper.clean_work_dir();
+}
+
 #[test]
 fn test_intercept_known_error_no_fix() {
     let helper = ScopeTestHelper::new(

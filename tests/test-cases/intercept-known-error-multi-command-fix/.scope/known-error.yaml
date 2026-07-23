@@ -1,0 +1,12 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeKnownError
+metadata:
+  name: multi-command-fix
+  description: A fix with multiple commands where the first always fails
+spec:
+  pattern: "trigger-multi-command-fix"
+  help: Testing that a fix stops running commands after the first one fails.
+  fix:
+    commands:
+      - "false"
+      - "echo SECOND_COMMAND_RAN"
