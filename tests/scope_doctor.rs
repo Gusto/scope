@@ -48,9 +48,48 @@ fn test_doctor_list() {
 
     result
         .success()
+        .stdout(predicate::str::contains("Included"))
         .stdout(predicate::str::contains("ScopeDoctorGroup/path-exists"))
         .stdout(predicate::str::contains("Check if file exists"))
         .stdout(predicate::str::contains(".scope/group.yaml"));
+
+    test_helper.clean_work_dir();
+}
+
+#[test]
+fn test_doctor_list_includes_when_required_groups() {
+    let test_helper = ScopeTestHelper::new(
+        "test_doctor_list_includes_when_required_groups",
+        "list-with-when-required",
+    );
+    let result = test_helper
+        .run_command(&["doctor", "list"])
+        .success()
+        .stdout(predicate::str::contains(
+            "ScopeDoctorGroup/when-required-group",
+        ))
+        .stdout(predicate::str::contains("ScopeDoctorGroup/default-group"));
+
+    let output = result.get_output().stdout.clone();
+    let stdout = String::from_utf8(output).expect("stdout should be utf8");
+
+    let default_line = stdout
+        .lines()
+        .find(|line| line.contains("ScopeDoctorGroup/default-group"))
+        .expect("default-group line should be present");
+    assert!(
+        default_line.contains("Yes"),
+        "expected default-group to be marked Included: Yes, got: {default_line}"
+    );
+
+    let when_required_line = stdout
+        .lines()
+        .find(|line| line.contains("ScopeDoctorGroup/when-required-group"))
+        .expect("when-required-group line should be present");
+    assert!(
+        when_required_line.contains("No"),
+        "expected when-required-group to be marked Included: No, got: {when_required_line}"
+    );
 
     test_helper.clean_work_dir();
 }
