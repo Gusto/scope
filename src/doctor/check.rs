@@ -1067,6 +1067,26 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn test_fix_false_check_fails_reports_no_run_fix_without_running_fix() -> Result<()> {
+        let action = build_run_fail_fix_succeed_action();
+        let mut exec_runner = MockExecutionProvider::new();
+        let glob_walker = MockGlobWalker::new();
+
+        command_result(&mut exec_runner, "check", vec![1]);
+
+        let mut run = setup_test(vec![action], exec_runner, glob_walker);
+        run.run_fix = false;
+
+        let result = run.run_action(panic_if_user_is_prompted).await?;
+        assert_eq!(ActionRunStatus::CheckFailedNoRunFix, result.status);
+
+        assert!(result.action_report.check.len() == 1);
+        assert!(result.action_report.fix.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_file_cache_invalid_fix_works() -> Result<()> {
         let action = build_file_fix_action();
         let mut glob_walker = MockGlobWalker::new();
