@@ -1,0 +1,15 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: when-required-group
+  description: Only runs when required
+spec:
+  include: when-required
+  actions:
+    - name: file-exists
+      check:
+        commands:
+          - test -f {{ working_dir }}/file-bar.txt
+      fix:
+        commands:
+          - touch {{ working_dir }}/file-bar.txt
