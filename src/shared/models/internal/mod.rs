@@ -5,7 +5,7 @@ use crate::models::prelude::{
 use crate::shared::prelude::*;
 use anyhow::Result;
 use anyhow::anyhow;
-use minijinja::{Environment, context};
+use minijinja::Environment;
 use path_clean::PathClean;
 use serde_yaml::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -22,7 +22,9 @@ use self::upload_location::ReportUploadLocation;
 
 pub mod prelude {
     pub use super::ParsedConfig;
+    pub use super::RegexCaptures;
     pub use super::generate_env_vars;
+    pub use super::substitute_templates_with_captures;
     pub use super::{command::*, doctor_group::*, fix::*, known_error::*, upload_location::*};
 }
 
@@ -94,11 +96,44 @@ pub(crate) fn extract_command_path(parent_dir: &Path, exec: &str) -> String {
         .join(" ")
 }
 
+/// Text captured from a `ScopeKnownError` pattern match, made available to templates so
+/// help text and fix commands can be parameterized by the matched error line.
+///
+/// `positional` holds the regex's capture groups in order (index `0` is the whole match,
+/// exposed to templates as `{{ captures[0] }}`, `{{ captures[1] }}`, ...). `named` holds any
+/// named capture groups (e.g. `(?<file>.*)`), exposed directly as `{{ file }}`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RegexCaptures {
+    pub positional: Vec<String>,
+    pub named: BTreeMap<String, String>,
+}
+
 pub(crate) fn substitute_templates(work_dir: &str, input_str: &str) -> Result<String> {
+    substitute_templates_with_captures(work_dir, input_str, &RegexCaptures::default())
+}
+
+#[derive(serde::Serialize)]
+struct TemplateContext<'a> {
+    working_dir: &'a str,
+    captures: &'a [String],
+    #[serde(flatten)]
+    named: &'a BTreeMap<String, String>,
+}
+
+pub fn substitute_templates_with_captures(
+    work_dir: &str,
+    input_str: &str,
+    captures: &RegexCaptures,
+) -> Result<String> {
     let mut env = Environment::new();
     env.add_template("input_str", input_str)?;
     let template = env.get_template("input_str")?;
-    let result = template.render(context! { working_dir => work_dir })?;
+    let ctx = TemplateContext {
+        working_dir: work_dir,
+        captures: &captures.positional,
+        named: &captures.named,
+    };
+    let result = template.render(ctx)?;
 
     Ok(result)
 }
@@ -170,6 +205,89 @@ mod tests {
             let actual = substitute_templates(working_dir, command).unwrap();
 
             assert_eq!("/foo.sh".to_string(), actual)
+        }
+    }
+
+    mod substitute_templates_with_captures_spec {
+        use super::*;
+
+        #[test]
+        fn positional_capture_is_subbed() {
+            let working_dir = "/some/path";
+            let captures = RegexCaptures {
+                positional: vec!["whole match".to_string(), "foo.sh".to_string()],
+                named: BTreeMap::new(),
+            };
+
+            let actual = substitute_templates_with_captures(
+                working_dir,
+                "chmod +x {{ captures[1] }}",
+                &captures,
+            )
+            .unwrap();
+
+            assert_eq!("chmod +x foo.sh".to_string(), actual)
+        }
+
+        #[test]
+        fn named_capture_is_subbed() {
+            let working_dir = "/some/path";
+            let mut named = BTreeMap::new();
+            named.insert("file".to_string(), "foo.sh".to_string());
+            let captures = RegexCaptures {
+                positional: vec!["whole match".to_string(), "foo.sh".to_string()],
+                named,
+            };
+
+            let actual =
+                substitute_templates_with_captures(working_dir, "chmod +x {{ file }}", &captures)
+                    .unwrap();
+
+            assert_eq!("chmod +x foo.sh".to_string(), actual)
+        }
+
+        #[test]
+        fn missing_capture_renders_empty() {
+            let working_dir = "/some/path";
+            let captures = RegexCaptures::default();
+
+            let actual =
+                substitute_templates_with_captures(working_dir, "chmod +x {{ file }}", &captures)
+                    .unwrap();
+
+            assert_eq!("chmod +x ".to_string(), actual)
+        }
+
+        #[test]
+        fn working_dir_still_resolves_alongside_captures() {
+            let working_dir = "/some/path";
+            let mut named = BTreeMap::new();
+            named.insert("file".to_string(), "foo.sh".to_string());
+            let captures = RegexCaptures {
+                positional: vec!["whole match".to_string()],
+                named,
+            };
+
+            let actual = substitute_templates_with_captures(
+                working_dir,
+                "{{ working_dir }}/{{ file }}",
+                &captures,
+            )
+            .unwrap();
+
+            assert_eq!("/some/path/foo.sh".to_string(), actual)
+        }
+
+        #[test]
+        fn no_captures_matches_substitute_templates() {
+            let working_dir = "/some/path";
+            let command = "{{ working_dir }}/foo.sh";
+
+            let actual =
+                substitute_templates_with_captures(working_dir, command, &RegexCaptures::default())
+                    .unwrap();
+
+            assert_eq!(substitute_templates(working_dir, command).unwrap(), actual)
         }
     }
 }

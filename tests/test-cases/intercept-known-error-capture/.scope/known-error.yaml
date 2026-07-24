@@ -1,0 +1,13 @@
+apiVersion: scope.github.com/v1alpha
+kind: ScopeKnownError
+metadata:
+  name: missing-captured-file
+  description: Detects a missing file from the error message and creates that exact file
+spec:
+  pattern: "cat: (?<file>.*): No such file or directory"
+  help: "The file '{{ file }}' does not exist. Creating it now."
+  fix:
+    prompt:
+      text: "Create '{{ file }}'?"
+    commands:
+      - bash -c 'echo "ready" > {{ file }}'

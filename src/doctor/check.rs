@@ -1591,14 +1591,14 @@ pub(crate) mod tests {
 
     mod analyze_known_errors_spec {
         use super::*;
-        use crate::models::prelude::{ModelMetadata, ModelMetadataAnnotations};
+        use crate::models::prelude::{DoctorFixSpec, ModelMetadata, ModelMetadataAnnotations};
         use crate::shared::analyze::AnalyzeStatus;
-        use regex::RegexSet;
+        use regex::Regex;
 
         fn make_known_error(pattern: &str, with_fix: bool) -> KnownError {
             let fix = if with_fix {
-                Some(DoctorFix {
-                    command: Some(DoctorCommands::from(vec!["true"])),
+                Some(DoctorFixSpec {
+                    commands: vec!["true".to_string()],
                     help_text: None,
                     help_url: None,
                     prompt: None,
@@ -1621,7 +1621,7 @@ pub(crate) mod tests {
                     },
                     labels: BTreeMap::new(),
                 },
-                regexes: RegexSet::new([pattern]).unwrap(),
+                regexes: vec![Regex::new(pattern).unwrap()],
                 help_text: "test help".to_string(),
                 fix,
             }
@@ -1712,6 +1712,29 @@ pub(crate) mod tests {
             let status = run.analyze_known_errors(&[report]).await?;
 
             assert!(matches!(status, AnalyzeStatus::KnownErrorFoundNoFixFound));
+            Ok(())
+        }
+
+        // help_text predates capture substitution and may contain brace-like literal text that
+        // isn't valid template syntax; that must not abort the run.
+        #[tokio::test]
+        async fn malformed_help_text_template_falls_back_to_raw_text() -> Result<()> {
+            let action = build_run_fail_fix_succeed_action();
+            let exec_runner = MockExecutionProvider::new();
+            let glob_walker = MockGlobWalker::new();
+            let mut run = setup_test(vec![action], exec_runner, glob_walker);
+
+            run.working_dir = PathBuf::from("/tmp");
+            run.yolo = true;
+            let mut known_error = make_known_error("error-pattern", true);
+            known_error.help_text = "Error code {500} occurred, 50% done, {% if".to_string();
+            run.known_errors
+                .insert("ScopeKnownError/test-error".to_string(), known_error);
+
+            let report = task_report("error-pattern found in output");
+            let status = run.analyze_known_errors(&[report]).await?;
+
+            assert!(matches!(status, AnalyzeStatus::KnownErrorFoundFixSucceeded));
             Ok(())
         }
     }
