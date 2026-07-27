@@ -39,7 +39,7 @@ indicatif = "*"
 inquire = {  version = "0.9", features = ["editor"]}
 itertools = { version = "0.15", features = [] }
 jsonschema = "0.33"
-jsonwebtoken = "*"
+jsonwebtoken = "10"
 lazy_static = "1.5.0"
 minijinja = { version = "2.20.0", features = ["loader"] }
 mockall = "0.15.0"
