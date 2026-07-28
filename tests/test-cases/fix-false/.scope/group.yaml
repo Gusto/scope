@@ -13,7 +13,6 @@ spec:
           - echo "fix ran"
     - name: run-always-not-required
       required: false
-      check: {}
       fix:
         commands:
           - echo "this always runs but isn't critical"

@@ -9,7 +9,7 @@ use crate::models::{HelpMetadata, InternalScopeModel, ScopeModel};
 
 /// What needs to be checked before the action will run. `paths` will be checked first, then
 /// `commands`. If a `path` matches no files or the matching files have changed, the `command` will run.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(deny_unknown_fields)]
 pub struct DoctorCheckSpec {
@@ -78,7 +78,9 @@ pub struct DoctorGroupActionSpec {
     /// The `check` run before `fix` (if provided). A check is used to determine if the fix needs
     /// to be executed, or fail the action if no fix is provided. If a fix is specified, the check
     /// will re-execute to ensure that the fix applied correctly.
-    pub check: DoctorCheckSpec,
+    ///
+    /// When omitted, there is no check and the fix will always run.
+    pub check: Option<DoctorCheckSpec>,
 
     /// A fix defines how to fix the issue that a `check` is validating. When provided, will only
     /// run when the `check` "fails".

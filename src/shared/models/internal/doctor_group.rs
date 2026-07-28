@@ -112,7 +112,9 @@ fn parse_action(
         None => DoctorFix::empty(),
     };
 
-    let check_command = match spec_action.check.commands {
+    let check_spec = spec_action.check.unwrap_or_default();
+
+    let check_command = match check_spec.commands {
         Some(ref check) => Some(DoctorCommands::from_commands(
             containing_dir,
             &working_dir,
@@ -130,7 +132,7 @@ fn parse_action(
         fix,
         check: DoctorGroupActionCheck {
             command: check_command,
-            files: spec_action.check.paths.map(|paths| DoctorGroupCachePath {
+            files: check_spec.paths.map(|paths| DoctorGroupCachePath {
                 paths: paths
                     .iter() // TODO: should this be as_ref() still? Changed because type inference error
                     .map(|p| substitute_templates(working_dir.as_str(), p).unwrap()) // TODO: implement a function here, make it an early exit
@@ -162,6 +164,7 @@ mod tests {
 
         let dg = configs[0].get_doctor_group().unwrap();
         assert_eq!("foo", dg.metadata.name);
+        assert_eq!(3, dg.actions.len());
         assert_eq!(
             "/foo/bar/.scope/file.yaml",
             dg.metadata.annotations.file_path.unwrap()
@@ -209,5 +212,63 @@ mod tests {
                 }
             }
         );
+        assert_eq!(
+            dg.actions[2],
+            DoctorGroupAction {
+                name: "action3".to_string(),
+                required: true,
+                description: "foo3".to_string(),
+                fix: DoctorFix {
+                    command: Some(DoctorCommands::from(vec!["/foo/bar/.scope/fix3.sh"])),
+                    prompt: None,
+                    help_text: None,
+                    help_url: None,
+                },
+                check: DoctorGroupActionCheck {
+                    command: None,
+                    files: None,
+                }
+            }
+        );
+    }
+
+    /// Regression test for https://github.com/Gusto/scope/issues/153: `check` becoming
+    /// `Option<DoctorCheckSpec>` must not change how an explicit, empty `check: {}` (the
+    /// pre-existing "always run the fix" idiom) is parsed.
+    #[test]
+    fn omitted_check_and_empty_check_parse_identically() {
+        let work_dir = Path::new("/foo/bar");
+        let path = Path::new("/foo/bar/.scope/file.yaml");
+
+        let render = |check_yaml: &str| {
+            let text = format!(
+                r#"
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: foo
+spec:
+  actions:
+    - name: action1
+{check_yaml}      fix:
+        commands:
+          - ./fix1.sh
+"#
+            );
+            let configs = parse_models_from_string(work_dir, path, &text).unwrap();
+            configs[0].get_doctor_group().unwrap().actions[0]
+                .check
+                .clone()
+        };
+
+        let omitted = render("");
+        let empty = render("      check: {}\n");
+        let expected = DoctorGroupActionCheck {
+            command: None,
+            files: None,
+        };
+
+        assert_eq!(expected, omitted);
+        assert_eq!(expected, empty);
     }
 }
