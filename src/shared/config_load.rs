@@ -1,5 +1,5 @@
-use crate::models::prelude::{ModelRoot, V1AlphaKnownError};
-use crate::models::{HelpMetadata, InternalScopeModel};
+use crate::models::HelpMetadata;
+use crate::models::prelude::ModelRoot;
 use crate::shared::RUN_ID_ENV_VAR;
 use crate::shared::directories;
 use crate::shared::models::prelude::{DoctorGroup, KnownError, ParsedConfig, ReportUploadLocation};
@@ -70,7 +70,7 @@ impl ConfigOptions {
         };
 
         let config_path = self.find_scope_paths(&working_dir);
-        let found_config = FoundConfig::new(self, working_dir, config_path).await?;
+        let found_config = FoundConfig::new(self, working_dir, config_path).await;
 
         debug!("Loaded config {:?}", found_config);
 
@@ -132,7 +132,7 @@ impl FoundConfig {
         config_options: &ConfigOptions,
         working_dir: PathBuf,
         config_path: Vec<PathBuf>,
-    ) -> Result<Self> {
+    ) -> Self {
         let default_path = std::env::var("PATH").unwrap_or_default();
 
         let mut config_path = config_path.to_vec();
@@ -164,31 +164,19 @@ impl FoundConfig {
             run_id: config_options.get_run_id(),
         };
 
-        let known_error_api_version = V1AlphaKnownError::int_api_version().to_lowercase();
-        let known_error_kind = V1AlphaKnownError::int_kind().to_lowercase();
         for raw_config in raw_config {
-            // A recognized `ScopeKnownError` that fails to build can never work as written, so
-            // that's a hard failure. Anything else (including a `ScopeKnownError` from an
-            // apiVersion this binary doesn't recognize) keeps the tolerant warn-and-continue
-            // behavior from #68/PR #69, since scope needs to tolerate config it doesn't yet
-            // understand.
-            let is_known_error = raw_config.kind.to_lowercase() == known_error_kind
-                && raw_config.api_version.to_lowercase() == known_error_api_version;
             let full_name = raw_config.full_name();
             let file_path = raw_config.file_path();
 
             match raw_config.try_into() {
                 Ok(value) => this.add_model(value),
-                Err(e) if is_known_error => {
-                    return Err(e.context(format!("Unable to load {full_name} from {file_path}")));
-                }
                 Err(e) => {
                     warn!(target: "user", "Unable to load {} from {} because {}", full_name.bold(), file_path, e);
                 }
             }
         }
 
-        Ok(this)
+        this
     }
 
     pub fn write_raw_config_to_disk(&self) -> Result<PathBuf> {
@@ -527,17 +515,34 @@ mod tests {
         build_config_path(nonexistent_path);
     }
 
-    /// Regression test for https://github.com/Gusto/scope/issues/344: a `ScopeKnownError` that
-    /// fails its own validation (here, a reserved capture group name) must abort config load with
-    /// a diagnosable error, rather than silently registering nothing.
-    #[tokio::test]
-    async fn invalid_known_error_aborts_config_load() {
+    /// Writes each `(file_name, contents)` pair under a fresh temp `.scope` dir and loads it
+    /// through the real `FoundConfig::new` entrypoint.
+    async fn found_config_from_files(files: &[(&str, &str)]) -> FoundConfig {
         let temp_dir = tempdir().unwrap();
         let scope_dir = temp_dir.path().join(".scope");
         fs::create_dir_all(&scope_dir).unwrap();
-        fs::write(
-            scope_dir.join("known-error.yaml"),
-            r#"
+        for (name, contents) in files {
+            fs::write(scope_dir.join(name), contents).unwrap();
+        }
+
+        let config_options = ConfigOptions::parse_from(["scope"]);
+        FoundConfig::new(
+            &config_options,
+            temp_dir.path().to_path_buf(),
+            vec![scope_dir],
+        )
+        .await
+    }
+
+    /// Regression test for https://github.com/Gusto/scope/issues/344: a `ScopeKnownError` that
+    /// fails its own validation (here, a reserved capture group name) must be logged instead of
+    /// silently registering nothing, while a valid known error in the same directory still loads.
+    #[tokio::test]
+    async fn invalid_known_error_warns_and_continues() {
+        let found_config = found_config_from_files(&[
+            (
+                "bad-known-error.yaml",
+                r#"
 apiVersion: scope.github.com/v1alpha
 kind: ScopeKnownError
 metadata:
@@ -546,38 +551,36 @@ spec:
   pattern: "boom: (?<working_dir>.*)"
   help: "should never load"
 "#,
-        )
-        .unwrap();
-
-        let config_options = ConfigOptions::parse_from(["scope"]);
-        let result = FoundConfig::new(
-            &config_options,
-            temp_dir.path().to_path_buf(),
-            vec![scope_dir],
-        )
+            ),
+            (
+                "good-known-error.yaml",
+                r#"
+apiVersion: scope.github.com/v1alpha
+kind: ScopeKnownError
+metadata:
+  name: good
+spec:
+  pattern: "boom"
+  help: "fine"
+"#,
+            ),
+        ])
         .await;
 
-        let err = result.expect_err("invalid ScopeKnownError should abort config load");
-        let message = format!("{err:#}");
-        assert!(message.contains("reserved"), "unexpected error: {message}");
-        assert!(
-            message.contains("ScopeKnownError/bad-reserved"),
-            "unexpected error: {message}"
-        );
+        assert!(!found_config.known_error.contains_key("bad-reserved"));
+        assert!(found_config.known_error.contains_key("good"));
     }
 
-    /// Companion to `invalid_known_error_aborts_config_load`: a `ScopeDoctorGroup` that fails to
+    /// Companion to `invalid_known_error_warns_and_continues`: a `ScopeDoctorGroup` that fails to
     /// build (here, a broken fix template) should warn and be dropped, not abort the whole load —
-    /// that's the pre-existing, intentional behavior from #68/PR #69. A valid group in the same
-    /// directory must still load, proving this is "drop the bad one", not "load nothing".
+    /// the pre-existing, intentional behavior from #68/PR #69. A valid group in the same directory
+    /// must still load, proving this is "drop the bad one", not "load nothing".
     #[tokio::test]
     async fn invalid_doctor_group_warns_and_continues() {
-        let temp_dir = tempdir().unwrap();
-        let scope_dir = temp_dir.path().join(".scope");
-        fs::create_dir_all(&scope_dir).unwrap();
-        fs::write(
-            scope_dir.join("broken-group.yaml"),
-            r#"
+        let found_config = found_config_from_files(&[
+            (
+                "broken-group.yaml",
+                r#"
 apiVersion: scope.github.com/v1alpha
 kind: ScopeDoctorGroup
 metadata:
@@ -590,11 +593,10 @@ spec:
         commands:
           - "echo {{ unterminated"
 "#,
-        )
-        .unwrap();
-        fs::write(
-            scope_dir.join("good-group.yaml"),
-            r#"
+            ),
+            (
+                "good-group.yaml",
+                r#"
 apiVersion: scope.github.com/v1alpha
 kind: ScopeDoctorGroup
 metadata:
@@ -607,108 +609,11 @@ spec:
         commands:
           - echo fine
 "#,
-        )
-        .unwrap();
-
-        let config_options = ConfigOptions::parse_from(["scope"]);
-        let found_config = FoundConfig::new(
-            &config_options,
-            temp_dir.path().to_path_buf(),
-            vec![scope_dir],
-        )
-        .await
-        .expect("a broken ScopeDoctorGroup should warn and continue, not abort");
+            ),
+        ])
+        .await;
 
         assert!(!found_config.doctor_group.contains_key("broken"));
         assert!(found_config.doctor_group.contains_key("good"));
-    }
-
-    /// A `ScopeKnownError` from an apiVersion this binary doesn't recognize must NOT be treated as
-    /// a "recognized but invalid" known error — it's the same "config we don't yet understand"
-    /// case as an unrecognized kind, and should warn-and-continue rather than aborting the load.
-    /// (A future scope version adding a new known-error apiVersion must not break older binaries
-    /// running against a fleet-wide shared config directory.)
-    #[tokio::test]
-    async fn unrecognized_api_version_known_error_warns_and_continues() {
-        let temp_dir = tempdir().unwrap();
-        let scope_dir = temp_dir.path().join(".scope");
-        fs::create_dir_all(&scope_dir).unwrap();
-        fs::write(
-            scope_dir.join("known-error.yaml"),
-            r#"
-apiVersion: scope.github.com/v1beta
-kind: ScopeKnownError
-metadata:
-  name: future-version
-spec:
-  pattern: "boom"
-  help: "from a version this binary doesn't understand"
-"#,
-        )
-        .unwrap();
-
-        let config_options = ConfigOptions::parse_from(["scope"]);
-        let found_config = FoundConfig::new(
-            &config_options,
-            temp_dir.path().to_path_buf(),
-            vec![scope_dir],
-        )
-        .await
-        .expect("an unrecognized apiVersion should warn and continue, not abort");
-
-        assert!(found_config.known_error.is_empty());
-    }
-
-    /// A genuinely invalid `ScopeKnownError` aborts the whole config load, even when a perfectly
-    /// valid `ScopeDoctorGroup` sits in the same directory — this is the documented tradeoff of
-    /// treating known-error validation failures as fatal (see #344).
-    #[tokio::test]
-    async fn invalid_known_error_aborts_load_of_otherwise_valid_config() {
-        let temp_dir = tempdir().unwrap();
-        let scope_dir = temp_dir.path().join(".scope");
-        fs::create_dir_all(&scope_dir).unwrap();
-        fs::write(
-            scope_dir.join("good-group.yaml"),
-            r#"
-apiVersion: scope.github.com/v1alpha
-kind: ScopeDoctorGroup
-metadata:
-  name: good
-spec:
-  actions:
-    - name: action1
-      check: {}
-      fix:
-        commands:
-          - echo fine
-"#,
-        )
-        .unwrap();
-        fs::write(
-            scope_dir.join("bad-known-error.yaml"),
-            r#"
-apiVersion: scope.github.com/v1alpha
-kind: ScopeKnownError
-metadata:
-  name: bad-reserved
-spec:
-  pattern: "boom: (?<working_dir>.*)"
-  help: "should never load"
-"#,
-        )
-        .unwrap();
-
-        let config_options = ConfigOptions::parse_from(["scope"]);
-        let result = FoundConfig::new(
-            &config_options,
-            temp_dir.path().to_path_buf(),
-            vec![scope_dir],
-        )
-        .await;
-
-        assert!(
-            result.is_err(),
-            "an invalid known error must abort the whole load, even alongside valid config"
-        );
     }
 }
