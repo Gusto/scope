@@ -29,3 +29,8 @@ spec:
           - '*/*.txt'
         commands:
           - sleep infinity
+    - name: action3
+      description: foo3
+      fix:
+        commands:
+          - ./fix3.sh

@@ -52,6 +52,11 @@ spec:
       fix:
         commands:
           - yarn install
+    - description: Always re-link the shims
+      name: relink-shims
+      fix:
+        commands:
+          - ./scripts/relink-shims.sh
 ```
 
 In the example above, there are two actions, the first ensures that node is operational.

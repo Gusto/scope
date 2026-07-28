@@ -125,8 +125,15 @@
       "type": "object",
       "properties": {
         "check": {
-          "description": "The `check` run before `fix` (if provided). A check is used to determine if the fix needs\nto be executed, or fail the action if no fix is provided. If a fix is specified, the check\nwill re-execute to ensure that the fix applied correctly.",
-          "$ref": "#/$defs/DoctorCheckSpec"
+          "description": "The `check` run before `fix` (if provided). A check is used to determine if the fix needs\nto be executed, or fail the action if no fix is provided. If a fix is specified, the check\nwill re-execute to ensure that the fix applied correctly.\n\nWhen omitted, there is no check and the fix will always run.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoctorCheckSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "description": {
           "description": "A description of this specific action, used for information to the users.",
@@ -158,8 +165,7 @@
       },
       "additionalProperties": false,
       "required": [
-        "name",
-        "check"
+        "name"
       ]
     },
     "DoctorGroupKind": {
