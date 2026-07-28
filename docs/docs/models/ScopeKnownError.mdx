@@ -21,6 +21,13 @@ spec:
   help: The command had an error, try reading the logs around there to find out what happened.
 ```
 
+## Validation
+
+An invalid `ScopeKnownError` (a pattern with a reserved capture group name like `captures` or
+`working_dir`, or a `fix` whose template fails to render) causes `scope` to fail to load
+entirely, rather than silently ignoring that one check. A known error that isn't actually
+registered would otherwise give false confidence that `scope` is watching for it.
+
 ## Schema
 
 <Tabs>
