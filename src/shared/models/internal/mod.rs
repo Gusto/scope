@@ -1,3 +1,4 @@
+use crate::models::HelpMetadata;
 use crate::models::InternalScopeModel;
 use crate::models::prelude::{
     ModelRoot, V1AlphaDoctorGroup, V1AlphaKnownError, V1AlphaReportLocation,
@@ -63,18 +64,21 @@ impl TryFrom<ModelRoot<Value>> for ParsedConfig {
     type Error = anyhow::Error;
 
     fn try_from(value: ModelRoot<Value>) -> Result<Self, Self::Error> {
-        if let Ok(Some(known)) = V1AlphaDoctorGroup::known_type(&value) {
+        if let Some(known) = V1AlphaDoctorGroup::known_type(&value)? {
             return Ok(ParsedConfig::DoctorGroup(DoctorGroup::try_from(known)?));
         }
-        if let Ok(Some(known)) = V1AlphaKnownError::known_type(&value) {
+        if let Some(known) = V1AlphaKnownError::known_type(&value)? {
             return Ok(ParsedConfig::KnownError(KnownError::try_from(known)?));
         }
-        if let Ok(Some(known)) = V1AlphaReportLocation::known_type(&value) {
+        if let Some(known) = V1AlphaReportLocation::known_type(&value)? {
             return Ok(ParsedConfig::ReportUpload(ReportUploadLocation::try_from(
                 known,
             )?));
         }
-        Err(anyhow!("Error was know a known type"))
+        Err(anyhow!(
+            "'{}' did not match the apiVersion/kind of any known resource",
+            value.full_name()
+        ))
     }
 }
 

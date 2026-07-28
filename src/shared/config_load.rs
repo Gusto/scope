@@ -165,8 +165,14 @@ impl FoundConfig {
         };
 
         for raw_config in raw_config {
-            if let Ok(value) = raw_config.try_into() {
-                this.add_model(value);
+            let full_name = raw_config.full_name();
+            let file_path = raw_config.file_path();
+
+            match raw_config.try_into() {
+                Ok(value) => this.add_model(value),
+                Err(e) => {
+                    warn!(target: "user", "Unable to load {} from {} because {}", full_name.bold(), file_path, e);
+                }
             }
         }
 
@@ -507,5 +513,107 @@ mod tests {
     fn test_build_config_path_nonexistent_directory() {
         let nonexistent_path = Path::new("/this/path/does/not/exist/hopefully");
         build_config_path(nonexistent_path);
+    }
+
+    /// Writes each `(file_name, contents)` pair under a fresh temp `.scope` dir and loads it
+    /// through the real `FoundConfig::new` entrypoint.
+    async fn found_config_from_files(files: &[(&str, &str)]) -> FoundConfig {
+        let temp_dir = tempdir().unwrap();
+        let scope_dir = temp_dir.path().join(".scope");
+        fs::create_dir_all(&scope_dir).unwrap();
+        for (name, contents) in files {
+            fs::write(scope_dir.join(name), contents).unwrap();
+        }
+
+        let config_options = ConfigOptions::parse_from(["scope"]);
+        FoundConfig::new(
+            &config_options,
+            temp_dir.path().to_path_buf(),
+            vec![scope_dir],
+        )
+        .await
+    }
+
+    /// Regression test for https://github.com/Gusto/scope/issues/344: a `ScopeKnownError` that
+    /// fails its own validation (here, a reserved capture group name) must be logged instead of
+    /// silently registering nothing, while a valid known error in the same directory still loads.
+    #[tokio::test]
+    async fn invalid_known_error_warns_and_continues() {
+        let found_config = found_config_from_files(&[
+            (
+                "bad-known-error.yaml",
+                r#"
+apiVersion: scope.github.com/v1alpha
+kind: ScopeKnownError
+metadata:
+  name: bad-reserved
+spec:
+  pattern: "boom: (?<working_dir>.*)"
+  help: "should never load"
+"#,
+            ),
+            (
+                "good-known-error.yaml",
+                r#"
+apiVersion: scope.github.com/v1alpha
+kind: ScopeKnownError
+metadata:
+  name: good
+spec:
+  pattern: "boom"
+  help: "fine"
+"#,
+            ),
+        ])
+        .await;
+
+        assert!(!found_config.known_error.contains_key("bad-reserved"));
+        assert!(found_config.known_error.contains_key("good"));
+    }
+
+    /// Companion to `invalid_known_error_warns_and_continues`: a `ScopeDoctorGroup` that fails to
+    /// build (here, a broken fix template) should warn and be dropped, not abort the whole load —
+    /// the pre-existing, intentional behavior from #68/PR #69. A valid group in the same directory
+    /// must still load, proving this is "drop the bad one", not "load nothing".
+    #[tokio::test]
+    async fn invalid_doctor_group_warns_and_continues() {
+        let found_config = found_config_from_files(&[
+            (
+                "broken-group.yaml",
+                r#"
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: broken
+spec:
+  actions:
+    - name: action1
+      check: {}
+      fix:
+        commands:
+          - "echo {{ unterminated"
+"#,
+            ),
+            (
+                "good-group.yaml",
+                r#"
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: good
+spec:
+  actions:
+    - name: action1
+      check: {}
+      fix:
+        commands:
+          - echo fine
+"#,
+            ),
+        ])
+        .await;
+
+        assert!(!found_config.doctor_group.contains_key("broken"));
+        assert!(found_config.doctor_group.contains_key("good"));
     }
 }
