@@ -94,6 +94,12 @@ summary; its dependencies that get trimmed along with it are not.
 A command can either be relative, or use the PATH.
 To target a script relative to the group it must start with `.`, and giving a relative path to the group file.
 
+## Validation
+
+A `ScopeDoctorGroup` that fails to load (for example, a `check` or `fix` command whose template
+fails to render) is logged as a warning naming the file, and skipped. The rest of your
+configuration still loads normally.
+
 ## Schema
 
 <Tabs>
