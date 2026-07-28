@@ -86,7 +86,7 @@ async fn main() {
 async fn run_subcommand(opts: Cli) -> i32 {
     let loaded_config = match opts.config.load_config().await {
         Err(e) => {
-            error!(target: "user", "Failed to load configuration: {}", e);
+            error!(target: "user", "Failed to load configuration: {:#}", e);
             return 2;
         }
         Ok(c) => c,
