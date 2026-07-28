@@ -63,6 +63,7 @@ sha256 = "1.6.0"
 shellexpand = "3.1.2"
 strip-ansi-escapes = "0.2.1"
 strum = { version = "0.28", features = ["derive"] }
+tempfile = "3.27"
 thiserror = "2.0.18"
 time = { version = "0.3", features = ["macros", "formatting", "local-offset"] }
 tokio = { version = "1", features = ["full"] }
@@ -80,7 +81,6 @@ assert_cmd = "2.2.2"
 assert_fs = "1.1.4"
 nix = { version = "0.31", features = ["signal", "process"] }
 predicates = "3.1.4"
-tempfile = "3.27"
 wait-timeout = "0.2"
 
 [build-dependencies]

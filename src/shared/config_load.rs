@@ -13,7 +13,7 @@ use serde_yaml::{Deserializer, Value};
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
@@ -176,16 +176,17 @@ impl FoundConfig {
     pub fn write_raw_config_to_disk(&self) -> Result<PathBuf> {
         let json = serde_json::to_string(&self.raw_config)?;
         let json_bytes = json.as_bytes();
-        let file_path = PathBuf::from_iter(vec![
-            "/tmp",
-            "scope",
-            &format!("config-{}.json", self.run_id),
-        ]);
+
+        fs::create_dir_all("/tmp/scope")?;
+        let mut file = tempfile::Builder::new()
+            .prefix("config-")
+            .suffix(".json")
+            .tempfile_in("/tmp/scope")?;
+        file.write_all(json_bytes)?;
+
+        let (_, file_path) = file.keep()?;
 
         debug!("Merged config destination is to {}", file_path.display());
-
-        let mut file = File::create(&file_path)?;
-        file.write_all(json_bytes)?;
 
         Ok(file_path)
     }
