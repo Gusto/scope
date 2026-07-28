@@ -70,7 +70,7 @@ impl ConfigOptions {
         };
 
         let config_path = self.find_scope_paths(&working_dir);
-        let found_config = FoundConfig::new(self, working_dir, config_path).await;
+        let found_config = FoundConfig::new(self, working_dir, config_path).await?;
 
         debug!("Loaded config {:?}", found_config);
 
@@ -132,7 +132,7 @@ impl FoundConfig {
         config_options: &ConfigOptions,
         working_dir: PathBuf,
         config_path: Vec<PathBuf>,
-    ) -> Self {
+    ) -> Result<Self> {
         let default_path = std::env::var("PATH").unwrap_or_default();
 
         let mut config_path = config_path.to_vec();
@@ -164,13 +164,29 @@ impl FoundConfig {
             run_id: config_options.get_run_id(),
         };
 
+        let mut known_error_failures: Vec<String> = Vec::new();
         for raw_config in raw_config {
-            if let Ok(value) = raw_config.try_into() {
-                this.add_model(value);
+            let file_path = raw_config.metadata().file_path();
+            let kind = raw_config.kind.clone();
+            match ParsedConfig::try_from(raw_config) {
+                Ok(value) => this.add_model(value),
+                Err(e) => {
+                    let message =
+                        format!("Unable to convert config from {} because {}", file_path, e);
+                    if is_hard_fail_kind(&kind) {
+                        known_error_failures.push(message);
+                    } else {
+                        warn!(target: "user", "{}", message);
+                    }
+                }
             }
         }
 
-        this
+        if !known_error_failures.is_empty() {
+            return Err(anyhow!(known_error_failures.join("\n")));
+        }
+
+        Ok(this)
     }
 
     pub fn write_raw_config_to_disk(&self) -> Result<PathBuf> {
@@ -203,6 +219,13 @@ impl FoundConfig {
             }
         }
     }
+}
+
+/// A `ScopeKnownError` that fails to load is worse than useless: it looks like the tool is
+/// watching for that error when it isn't. Other kinds degrade gracefully (warn and continue),
+/// but known-error failures abort config load entirely.
+fn is_hard_fail_kind(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("ScopeKnownError")
 }
 
 fn insert_if_absent<T: HelpMetadata>(map: &mut BTreeMap<String, T>, entry: T) {
