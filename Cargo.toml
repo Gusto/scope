@@ -29,7 +29,7 @@ derivative = "2"
 derive_builder = "0.20"
 directories = "6"
 dotenvy = "0.15.7"
-educe = "0.7.4"
+educe = "0.8.1"
 fake = "5.1.0"
 gethostname = "1.1.0"
 glob = "0.3"
@@ -39,7 +39,7 @@ indicatif = "*"
 inquire = {  version = "0.9", features = ["editor"]}
 itertools = { version = "0.15", features = [] }
 jsonschema = "0.33"
-jsonwebtoken = "10"
+jsonwebtoken = "11"
 lazy_static = "1.5.0"
 minijinja = { version = "2.20.0", features = ["loader"] }
 mockall = "0.15.0"
