@@ -225,6 +225,10 @@ pub struct GroupReport {
 }
 
 impl GroupReport {
+    pub fn group_name(&self) -> &str {
+        &self.group_name
+    }
+
     pub fn add_action(&mut self, action_report: &ActionReport) {
         self.action_result.push(action_report.clone());
     }

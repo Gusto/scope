@@ -169,6 +169,14 @@
             "$ref": "#/$defs/DoctorGroupActionSpec"
           }
         },
+        "exclusiveResources": {
+          "description": "Resources that this group must hold exclusively while its actions run.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "include": {
           "description": "Change how a group is handled when building the dependency task graph.\nWhen set to `when-required`, the group will be ignored unless it's required by another\ndependency.",
           "$ref": "#/$defs/DoctorInclude",

@@ -89,6 +89,21 @@ dependency that isn't also required by another group still in the run. A shared 
 also required by a non-skipped group) is kept. The skipped group is still reported in the run
 summary; its dependencies that get trimmed along with it are not.
 
+## Exclusive resources
+
+Set `spec.exclusiveResources` to a list of names for operations that must not
+overlap, such as Homebrew package changes. During `doctor run --parallel`, Scope
+holds those names for the full group execution. Two groups sharing a name run
+one after the other; unrelated groups may still run together.
+Use a shared `terminal` name for groups whose commands can read from the terminal.
+
+```yaml
+spec:
+  exclusiveResources:
+    - homebrew
+  actions: []
+```
+
 ## Commands
 
 A command can either be relative, or use the PATH.

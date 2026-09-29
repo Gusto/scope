@@ -53,6 +53,8 @@ pub struct DoctorGroup {
     pub full_name: String,
     pub metadata: ModelMetadata,
     pub requires: Vec<String>,
+    #[builder(default)]
+    pub exclusive_resources: Vec<String>,
     pub run_by_default: bool,
     pub actions: Vec<DoctorGroupAction>,
     pub extra_report_args: BTreeMap<String, String>,
@@ -84,6 +86,7 @@ impl TryFrom<V1AlphaDoctorGroup> for DoctorGroup {
             metadata: model.metadata,
             actions,
             requires: model.spec.needs,
+            exclusive_resources: model.spec.exclusive_resources,
             run_by_default: model.spec.include == DoctorInclude::ByDefault,
             extra_report_args: model.spec.report_extra_details,
             skip: model.spec.skip,
@@ -230,6 +233,28 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn parses_exclusive_resources() {
+        let text = r#"
+apiVersion: scope.github.com/v1alpha
+kind: ScopeDoctorGroup
+metadata:
+  name: package-install
+spec:
+  exclusiveResources:
+    - homebrew
+  actions: []
+"#;
+        let configs = parse_models_from_string(
+            Path::new("/foo/bar"),
+            Path::new("/foo/bar/.scope/file.yaml"),
+            text,
+        )
+        .unwrap();
+        let group = configs[0].get_doctor_group().unwrap();
+        assert_eq!(group.exclusive_resources, vec!["homebrew"]);
     }
 
     /// Regression test for https://github.com/Gusto/scope/issues/153: `check` becoming

@@ -71,11 +71,8 @@ where
                             &captures,
                         )?;
 
-                        tracing_indicatif::suspend_tracing_indicatif(|| {
-                            let exec_path = ke.metadata.exec_path();
-                            prompt_and_run_fix(working_dir, exec_path, &fix, yolo)
-                        })
-                        .await?
+                        let exec_path = ke.metadata.exec_path();
+                        prompt_and_run_fix(working_dir, exec_path, &fix, yolo).await?
                     }
                     None => AnalyzeStatus::KnownErrorFoundNoFixFound,
                 };
@@ -126,7 +123,10 @@ async fn prompt_and_run_fix(
             }
         };
 
-        match prompt.prompt() {
+        let response = crate::shared::with_terminal_prompt(|| {
+            tracing_indicatif::suspend_tracing_indicatif(|| prompt.prompt())
+        });
+        match response {
             Ok(accepted) => Ok::<bool, anyhow::Error>(accepted),
             Err(InquireError::NotTTY) => {
                 warn!(target: "user", "Prompting user for fix, but input device is not a TTY. Skipping fix.");
