@@ -36,6 +36,18 @@ dependency subtree.
 
 By default, any provided fix's will be run. If you don't want to run fixes add `--fix=false` to disable fixing issues.
 
+`--parallel` runs up to two independent groups at once. A group's actions stay in order,
+and a dependent group starts only after its prerequisites succeed. Groups with a shared
+[`exclusiveResources` declaration](../models/ScopeDoctorGroup.mdx#exclusive-resources)
+never overlap. On a fail-fast result, already-running groups finish and no new groups start.
+Failed or user-denied prerequisites block their dependents, including when the failed action is
+optional or `--fix=false` leaves a check unresolved. Those groups are reported as skipped.
+Scope waits for running child commands before showing a fix confirmation; config authors should
+give commands that prompt on their own a shared
+`terminal` resource so those commands do not compete for input.
+Parallel runs reject cycles and references to unknown prerequisites before reporting success.
+The default run remains sequential.
+
 When using a [ScopeDoctorGroup](../models/ScopeDoctorGroup.mdx), the checksum of files are stored on disk. If you need to disable caching, add `--no-cache`.
 
 ```text
@@ -49,7 +61,8 @@ Options:
       --skip-only <SKIP_ONLY>        When set, only the named groups are removed from the run; their dependencies still run
   -f, --fix <FIX>                    When set, if a fix is specified it will also run [default: true] [possible values: true, false]
   -n, --no-cache                     When set cache will be disabled, forcing all file based checks to run
-      --yolo                         Automatically approve all fix prompts without asking
+  -y, --yolo                         Automatically approve all fix prompts without asking
+      --parallel                     Run independent groups concurrently (up to two); failed prerequisites block dependents
 (excluded default args)
 ```
 

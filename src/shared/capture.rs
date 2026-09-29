@@ -10,12 +10,32 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use thiserror::Error;
 use tokio::io;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::RwLock;
-use tracing::{Level, debug, error, info, instrument};
+use tracing::{Instrument, Level, debug, error, info, instrument};
 use which::which_in;
+
+// Child commands inherit the terminal. A Scope confirmation must wait for
+// running commands to release it, while independent commands may run together.
+pub(crate) static TERMINAL_ACCESS: LazyLock<RwLock<()>> = LazyLock::new(RwLock::default);
+
+pub(crate) fn with_terminal_prompt<R>(prompt: impl FnOnce() -> R) -> R {
+    // The CLI uses a multi-thread runtime. Keep the old prompt behavior for
+    // library callers using a current-thread runtime.
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(|| {
+            let _terminal_access = TERMINAL_ACCESS.blocking_write();
+            prompt()
+        })
+    } else {
+        prompt()
+    }
+}
 
 #[derive(Debug, Default)]
 struct RwLockOutput {
@@ -166,6 +186,7 @@ impl OutputCapture {
     #[instrument(skip_all)]
     pub async fn capture_output(opts: CaptureOpts<'_>) -> Result<Self, CaptureError> {
         check_pre_exec(&opts)?;
+        let _terminal_access = TERMINAL_ACCESS.read().await;
         let args = opts.args.to_vec();
 
         debug!("Executing PATH={} {:?}", &opts.path, &args);
@@ -180,7 +201,12 @@ impl OutputCapture {
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
             .current_dir(opts.working_dir)
+            .kill_on_drop(true)
             .spawn()?;
+
+        // Both pipes must be read while the child is running. JoinSet aborts the
+        // readers if the capture is cancelled; kill_on_drop stops the child.
+        let mut readers = tokio::task::JoinSet::new();
 
         // capture stdout
         let stdout = child.stdout.take().expect("stdout to be available");
@@ -190,7 +216,8 @@ impl OutputCapture {
             level: Level::INFO,
             dest: opts.output_dest.clone(),
         };
-        let stdout = stdout_stream.capture_output();
+        readers
+            .spawn(async move { (true, stdout_stream.capture_output().await) }.in_current_span());
 
         // capture stderr
         let stderr = child.stderr.take().expect("stderr to be available");
@@ -200,15 +227,22 @@ impl OutputCapture {
             level: Level::ERROR,
             dest: opts.output_dest.clone(),
         };
-        let stderr = stderr_stream.capture_output();
+        readers
+            .spawn(async move { (false, stderr_stream.capture_output().await) }.in_current_span());
 
         // wait for app to exit
-        let (command_result, wait_stdout, wait_stderr) = tokio::join!(child.wait(), stdout, stderr);
+        let command_result = child.wait().await;
+        let mut captured_stdout = Vec::new();
+        let mut captured_stderr = Vec::new();
+        while let Some(read_result) = readers.join_next().await {
+            match read_result {
+                Ok((true, Ok(lines))) => captured_stdout = lines,
+                Ok((false, Ok(lines))) => captured_stderr = lines,
+                _ => {}
+            }
+        }
         let end_time = Utc::now();
         debug!("join result {:?}", command_result);
-
-        let captured_stdout = wait_stdout.unwrap_or_default();
-        let captured_stderr = wait_stderr.unwrap_or_default();
 
         Ok(Self {
             working_dir: opts.working_dir.to_path_buf(),
@@ -315,4 +349,79 @@ fn check_pre_exec(opts: &CaptureOpts) -> Result<(), CaptureError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn child_waits_for_terminal_and_drains_large_output() {
+        let prompt = TERMINAL_ACCESS.write().await;
+        let child = tokio::spawn(async {
+            let workdir = std::env::temp_dir();
+            let args = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "yes output | head -n 20000".to_string(),
+            ];
+            OutputCapture::capture_output(CaptureOpts {
+                working_dir: &workdir,
+                env_vars: BTreeMap::new(),
+                path: "/usr/bin:/bin",
+                args: &args,
+                output_dest: OutputDisplay::Silent,
+            })
+            .await
+            .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!child.is_finished());
+        drop(prompt);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), child)
+            .await
+            .expect("child should finish after prompt releases terminal")
+            .unwrap();
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(output.get_stdout().lines().count(), 20000);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_capture_stops_child_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let ready = directory.path().join("ready");
+        let marker = directory.path().join("marker");
+        let workdir = directory.path().to_path_buf();
+        let ready_value = ready.to_string_lossy().into_owned();
+        let marker_value = marker.to_string_lossy().into_owned();
+        let capture = tokio::spawn(async move {
+            let args = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "touch \"$READY\"; sleep 1; touch \"$MARKER\"".to_string(),
+            ];
+            OutputCapture::capture_output(CaptureOpts {
+                working_dir: &workdir,
+                env_vars: BTreeMap::from([
+                    ("READY".to_string(), ready_value),
+                    ("MARKER".to_string(), marker_value),
+                ]),
+                path: "/usr/bin:/bin",
+                args: &args,
+                output_dest: OutputDisplay::Silent,
+            })
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !ready.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child should start");
+        capture.abort();
+        assert!(capture.await.unwrap_err().is_cancelled());
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert!(!marker.exists());
+    }
 }

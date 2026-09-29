@@ -1677,6 +1677,29 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn known_error_prompt_waits_for_running_terminal_command() -> Result<()> {
+            let action = build_run_fail_fix_succeed_action();
+            let exec_runner = MockExecutionProvider::new();
+            let glob_walker = MockGlobWalker::new();
+            let mut run = setup_test(vec![action], exec_runner, glob_walker);
+            run.yolo = false;
+            run.known_errors.insert(
+                "ScopeKnownError/test-error".to_string(),
+                make_known_error("error-pattern", true),
+            );
+            let report = task_report("error-pattern found in output");
+            let command = crate::shared::TERMINAL_ACCESS.read().await;
+            let prompt = tokio::spawn(async move { run.analyze_known_errors(&[report]).await });
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            assert!(!prompt.is_finished());
+            drop(command);
+            let status =
+                tokio::time::timeout(std::time::Duration::from_secs(2), prompt).await???;
+            assert!(matches!(status, AnalyzeStatus::KnownErrorFoundUserDenied));
+            Ok(())
+        }
+
         #[tokio::test]
         async fn no_pattern_match_returns_no_known_errors() -> Result<()> {
             let action = build_run_fail_fix_succeed_action();

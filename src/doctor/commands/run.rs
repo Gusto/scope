@@ -47,6 +47,9 @@ pub struct DoctorRunArgs {
     /// Automatically approve all fix prompts without asking
     #[arg(long, short = 'y', default_value = "false")]
     pub yolo: bool,
+    /// Run independent groups concurrently (up to two); failed prerequisites block dependents.
+    #[arg(long, action = clap::ArgAction::SetTrue, overrides_with = "parallel")]
+    pub parallel: bool,
 }
 
 fn get_cache(args: &DoctorRunArgs) -> Arc<dyn FileCache> {
@@ -192,6 +195,19 @@ pub async fn doctor_run(found_config: &FoundConfig, args: &DoctorRunArgs) -> Res
         warn!(target: "user", "Could not find any tasks to execute");
     }
 
+    if args.parallel {
+        for name in &all_paths {
+            let Some(group) = found_config.doctor_group.get(name) else {
+                continue;
+            };
+            for dependency in &group.requires {
+                if !found_config.doctor_group.contains_key(dependency) {
+                    anyhow::bail!("group {name} needs unknown group {dependency}");
+                }
+            }
+        }
+    }
+
     let graph = RunGraph::new(&all_paths, &found_config.doctor_group);
     let run_groups = RunGroups {
         group_actions: transform.groups,
@@ -201,7 +217,11 @@ pub async fn doctor_run(found_config: &FoundConfig, args: &DoctorRunArgs) -> Res
         yolo: args.yolo,
     };
 
-    let result = run_groups.execute().await?;
+    let result = if args.parallel {
+        run_groups.execute_parallel().await?
+    } else {
+        run_groups.execute().await?
+    };
     report_stdout!("Summary: {}", result);
 
     if let Err(e) = transform.file_cache.persist().await {
@@ -329,6 +349,7 @@ fn transform_inputs(found_config: &FoundConfig, args: &DoctorRunArgs) -> RunTran
 #[cfg(test)]
 mod test {
     use super::*;
+    use clap::Parser;
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
@@ -338,6 +359,57 @@ mod test {
     use crate::prelude::{
         DoctorGroup, FoundConfig, MockExecutionProvider, OutputCaptureBuilder, SkipSpec,
     };
+
+    #[test]
+    fn parallel_flag_is_opt_in_and_idempotent() {
+        let default = DoctorRunArgs::try_parse_from(["run"]).unwrap();
+        assert!(!default.parallel);
+        let enabled = DoctorRunArgs::try_parse_from(["run", "--parallel", "--parallel"]).unwrap();
+        assert!(enabled.parallel);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_run_rejects_unknown_dependency() {
+        let mut config = FoundConfig::empty(PathBuf::from("/tmp"));
+        config.doctor_group.insert(
+            "group".to_string(),
+            make_root_model_additional(
+                vec![],
+                |meta| meta.name("group"),
+                |group| group.requires(vec!["missing".to_string()]),
+            ),
+        );
+        let args = DoctorRunArgs {
+            parallel: true,
+            no_cache: true,
+            ..Default::default()
+        };
+        let error = doctor_run(&config, &args).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("group group needs unknown group missing")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_doctor_run_completes_successfully() {
+        let mut config = FoundConfig::empty(std::env::temp_dir());
+        config.doctor_group.insert(
+            "first".to_string(),
+            make_root_model_additional(vec![], |meta| meta.name("first"), group_noop),
+        );
+        config.doctor_group.insert(
+            "second".to_string(),
+            make_root_model_additional(vec![], |meta| meta.name("second"), group_noop),
+        );
+        let args = DoctorRunArgs {
+            parallel: true,
+            no_cache: true,
+            ..Default::default()
+        };
+        assert_eq!(doctor_run(&config, &args).await.unwrap(), 0);
+    }
 
     #[test]
     fn test_will_include_by_default() {

@@ -6,6 +6,7 @@ use crate::prelude::{
     SkipSpec, generate_env_vars, progress_bar_without_pos,
 };
 use crate::shared::prelude::DoctorGroup;
+use crate::shared::with_terminal_prompt;
 use anyhow::Result;
 use colored::Colorize;
 use opentelemetry::trace::Status;
@@ -104,6 +105,8 @@ struct GroupExecutionResult {
     group_report: GroupReport,
 }
 
+const MAX_PARALLEL_GROUPS: usize = 2;
+
 pub struct GroupActionContainer<T>
 where
     T: DoctorActionRun,
@@ -181,10 +184,9 @@ where
 
 /// The dependency DAG over a run's runnable groups (i.e. exactly the names in the topological
 /// `order` passed to [`RunGraph::new`]). An edge points from a dependent to a group it
-/// `requires`. Built once during planning and walked recursively during execution, so a
-/// dependent group's span is opened before — and therefore encloses — the spans of the groups
-/// it depends on (see issue #172: previously every group span was a sibling directly under
-/// `doctor run`, regardless of `requires`).
+/// `requires`. The sequential executor walks it recursively, so a dependent group's span
+/// encloses the spans of its dependencies (see issue #172). The parallel executor uses the
+/// same edges for readiness and parents all concurrently runnable groups under `doctor run`.
 ///
 /// A "root" is a group no other group in the graph requires — these are the groups that parent
 /// directly to the top-level `doctor run` span. A group required by more than one other group
@@ -192,9 +194,10 @@ where
 /// it first during the walk.
 ///
 /// Nodes are added in `order`, so `NodeIndex::index()` equals a node's position in `order` —
-/// [`RunGraph::roots`] and [`RunGraph::dependencies`] sort by that position so the recursive
-/// walk's group-by-group execution sequence matches `order` exactly (this is what preserves
-/// fail-fast and reporting behavior; see [`RunGroups::execute`]).
+/// [`RunGraph::roots`] and [`RunGraph::dependencies`] sort by that position so the sequential
+/// recursive walk's group-by-group execution sequence matches `order` exactly (see
+/// [`RunGroups::execute`]). Parallel execution uses the same edges for readiness but parents
+/// every group span directly under the run because a group may have several dependencies.
 pub(crate) struct RunGraph {
     graph: DiGraph<String, ()>,
     nodes: BTreeMap<String, NodeIndex>,
@@ -214,9 +217,8 @@ impl RunGraph {
     /// points edges dependent-to-dependency (so [`RunGraph::roots`]/[`RunGraph::dependencies`]
     /// read naturally), owns its `String` node weights, and treats a missing name as
     /// unremarkable (it was legitimately trimmed by planning, e.g. via `--skip`) rather than as
-    /// a config error. If dependency-graph semantics change — most likely cycle detection, since
-    /// none exists today (see the fallback pass in [`RunGroups::execute`]) — check whether it
-    /// should apply to both.
+    /// a config error. Parallel runs reject cycles before execution; sequential runs use the
+    /// fallback pass in [`RunGroups::execute`] to run cyclic groups with a warning.
     pub(crate) fn new(order: &[String], groups: &BTreeMap<String, DoctorGroup>) -> Self {
         let mut graph = DiGraph::<String, ()>::new();
         let nodes: BTreeMap<String, NodeIndex> = order
@@ -316,6 +318,200 @@ impl<T> RunGroups<T>
 where
     T: DoctorActionRun,
 {
+    /// Execute ready groups with bounded concurrency. A completed failure blocks its
+    /// dependents; a fail-fast result stops new work while already-running work drains.
+    pub async fn execute_parallel(self) -> Result<PathRunResult>
+    where
+        T: 'static,
+    {
+        if !tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        }) {
+            anyhow::bail!("parallel doctor run requires a multi-thread Tokio runtime");
+        }
+        if let Err(cycle) = petgraph::algo::toposort(&self.graph.graph, None) {
+            anyhow::bail!(
+                "cyclic or unsatisfied doctor dependencies involving {}",
+                self.graph.name(cycle.node_id())
+            );
+        }
+        Arc::new(self).execute_parallel_inner().await
+    }
+
+    async fn execute_parallel_inner(self: Arc<Self>) -> Result<PathRunResult>
+    where
+        T: 'static,
+    {
+        let header_span = info_span!("doctor run", "indicatif.pb_show" = true);
+        header_span.pb_set_length((self.graph.len() + self.skipped_groups.len()) as u64);
+        header_span.pb_set_message("scope doctor run --parallel");
+        let _span = header_span.enter();
+
+        for name in &self.full_order {
+            if self.skipped_groups.contains(name) {
+                header_span.pb_inc(1);
+                warn!(target: "always", "Group skipped, group: \"{}\"", name);
+            }
+        }
+
+        let mut pending: BTreeSet<String> = self
+            .full_order
+            .iter()
+            .filter(|name| self.graph.contains(name))
+            .cloned()
+            .collect();
+        let mut completed = BTreeMap::<String, GroupExecutionResult>::new();
+        let mut blocked = BTreeSet::<String>::new();
+        let mut held_resources = BTreeSet::<String>::new();
+        let mut running_resources = BTreeMap::<String, Vec<String>>::new();
+        // JoinSet aborts active groups if the run itself is cancelled.
+        let mut running = tokio::task::JoinSet::<(String, Result<GroupExecutionResult>)>::new();
+        let mut stop_new = false;
+        let mut first_error = None;
+
+        while !pending.is_empty() || !running.is_empty() {
+            // Revisit all pending groups after each completion. The order is stable, so a
+            // resource conflict never changes which of two ready groups starts first.
+            for name in &self.full_order {
+                if !pending.contains(name) {
+                    continue;
+                }
+                let node = self.graph.node(name).expect("pending group is in graph");
+                let deps = self.graph.dependencies(node);
+                if stop_new
+                    || deps.iter().any(|dep| {
+                        let dep_name = self.graph.name(*dep);
+                        blocked.contains(dep_name)
+                            || completed.get(dep_name).is_some_and(|result| {
+                                result.status != GroupExecutionStatus::Succeeded
+                            })
+                    })
+                {
+                    pending.remove(name);
+                    blocked.insert(name.clone());
+                    header_span.pb_inc(1);
+                    warn!(target: "always", "Group skipped, group: \"{}\" (prerequisite failed or run stopped)", name);
+                    continue;
+                }
+                if running.len() == MAX_PARALLEL_GROUPS
+                    || !deps
+                        .iter()
+                        .all(|dep| completed.contains_key(self.graph.name(*dep)))
+                {
+                    continue;
+                }
+
+                let Some(container) = self.group_actions.get(name) else {
+                    first_error
+                        .get_or_insert(anyhow::anyhow!("no action container for group {name}"));
+                    stop_new = true;
+                    pending.remove(name);
+                    blocked.insert(name.clone());
+                    header_span.pb_inc(1);
+                    continue;
+                };
+                if container
+                    .group
+                    .exclusive_resources
+                    .iter()
+                    .any(|resource| held_resources.contains(resource))
+                {
+                    continue;
+                }
+                for resource in &container.group.exclusive_resources {
+                    held_resources.insert(resource.clone());
+                }
+                running_resources.insert(name.clone(), container.group.exclusive_resources.clone());
+                pending.remove(name);
+                let group_name = name.clone();
+                let group_span = info_span!(
+                    parent: &header_span, "group", "indicatif.pb_show" = true,
+                    "group.name" = group_name.as_str(),
+                    "otel.name" = format!("group {}", group_name)
+                );
+                group_span.pb_set_length(container.actions.len() as u64);
+                group_span.pb_set_message(&format!("group {group_name}"));
+                let run_groups = self.clone();
+                let running_name = group_name.clone();
+                running.spawn(async move {
+                    let container = run_groups
+                        .group_actions
+                        .get(&group_name)
+                        .expect("scheduled group still has its action container");
+                    let result = run_groups
+                        .execute_group(&group_span, container)
+                        .instrument(group_span.clone())
+                        .await;
+                    if let Ok(group_result) = &result
+                        && group_result.status == GroupExecutionStatus::Failed
+                    {
+                        group_span.set_status(Status::Error {
+                            description: std::borrow::Cow::Owned(format!(
+                                "{} group failed",
+                                group_result.group_name
+                            )),
+                        });
+                    }
+                    (running_name, result)
+                });
+            }
+
+            if let Some(joined) = running.join_next().await {
+                header_span.pb_inc(1);
+                match joined {
+                    Ok((name, result)) => {
+                        for resource in running_resources.remove(&name).unwrap_or_default() {
+                            held_resources.remove(&resource);
+                        }
+                        match result {
+                            Ok(group_result) => {
+                                stop_new |= group_result.skip_remaining;
+                                completed.insert(name, group_result);
+                            }
+                            Err(error) => {
+                                stop_new = true;
+                                blocked.insert(name);
+                                first_error.get_or_insert(error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        stop_new = true;
+                        first_error.get_or_insert(error.into());
+                    }
+                }
+            } else if !pending.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "cyclic or unsatisfied doctor dependencies: {}",
+                    pending.iter().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
+
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+
+        let mut result = PathRunResult {
+            did_succeed: true,
+            succeeded_groups: BTreeSet::new(),
+            failed_group: BTreeSet::new(),
+            skipped_group: BTreeSet::new(),
+            group_reports: Vec::new(),
+        };
+        for name in &self.full_order {
+            if self.skipped_groups.contains(name) {
+                result.skipped_group.insert(name.clone());
+                result.group_reports.push(GroupReport::new(name));
+            } else if let Some(group_result) = completed.get(name) {
+                result.process(group_result);
+            } else if blocked.contains(name) {
+                result.skipped_group.insert(name.clone());
+            }
+        }
+        Ok(result)
+    }
+
     pub async fn execute(&self) -> Result<PathRunResult> {
         let header_span = info_span!("doctor run", "indicatif.pb_show" = true);
         header_span.pb_set_length((self.graph.len() + self.skipped_groups.len()) as u64);
@@ -575,16 +771,18 @@ where
 }
 
 fn prompt_user(prompt_text: &str, maybe_help_text: &Option<String>) -> bool {
-    tracing_indicatif::suspend_tracing_indicatif(|| {
-        let prompt = {
-            let base_prompt = inquire::Confirm::new(prompt_text).with_default(false);
-            match maybe_help_text {
-                Some(help_text) => base_prompt.with_help_message(help_text),
-                None => base_prompt,
-            }
-        };
+    with_terminal_prompt(|| {
+        tracing_indicatif::suspend_tracing_indicatif(|| {
+            let prompt = {
+                let base_prompt = inquire::Confirm::new(prompt_text).with_default(false);
+                match maybe_help_text {
+                    Some(help_text) => base_prompt.with_help_message(help_text),
+                    None => base_prompt,
+                }
+            };
 
-        prompt.prompt().unwrap_or(false)
+            prompt.prompt().unwrap_or(false)
+        })
     })
 }
 
@@ -869,6 +1067,7 @@ pub fn compute_group_order(params: GroupOrderParams) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
 
     use crate::doctor::check::tests::build_run_fail_fix_succeed_action;
     use crate::doctor::check::{
@@ -881,13 +1080,650 @@ mod tests {
     use crate::prelude::{ActionReport, ActionTaskReport, CaptureError, MockExecutionProvider};
     use anyhow::Result;
     use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::vec;
+    use tokio::sync::Notify;
     use tracing::field::{Field, Visit};
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
     fn no_skip() -> BTreeSet<String> {
         BTreeSet::new()
+    }
+
+    struct TimedAction {
+        name: &'static str,
+        active: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        events: Option<Arc<Mutex<Vec<String>>>>,
+        status: ActionRunStatus,
+        required: bool,
+        delay_ms: u64,
+        should_run: bool,
+        fail_with_error: bool,
+        panic_after_delay: bool,
+    }
+
+    #[async_trait]
+    impl DoctorActionRun for TimedAction {
+        async fn run_action(
+            &self,
+            _: for<'a> fn(&'a str, &'a Option<String>) -> bool,
+        ) -> Result<ActionRunResult> {
+            assert!(self.should_run, "{} must not run", self.name);
+            if let Some(events) = &self.events {
+                events
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} started", self.name));
+            }
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            if let Some(events) = &self.events {
+                events
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} finished", self.name));
+            }
+            if self.fail_with_error {
+                anyhow::bail!("{} action error", self.name);
+            }
+            assert!(!self.panic_after_delay, "{} action panicked", self.name);
+            Ok(ActionRunResult::new(
+                self.name,
+                self.status.clone(),
+                None,
+                None,
+                None,
+            ))
+        }
+        fn required(&self) -> bool {
+            self.required
+        }
+        fn name(&self) -> String {
+            self.name.to_string()
+        }
+        fn description(&self) -> String {
+            self.name.to_string()
+        }
+        fn help_text(&self) -> Option<String> {
+            None
+        }
+        fn help_url(&self) -> Option<String> {
+            None
+        }
+    }
+
+    struct TerminalAction {
+        name: &'static str,
+        started: Arc<Notify>,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl DoctorActionRun for TerminalAction {
+        async fn run_action(
+            &self,
+            _: for<'a> fn(&'a str, &'a Option<String>) -> bool,
+        ) -> Result<ActionRunResult> {
+            if self.name == "command" {
+                let _terminal = crate::shared::TERMINAL_ACCESS.read().await;
+                self.started.notify_one();
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                self.events.lock().unwrap().push("command finished");
+            } else {
+                self.started.notified().await;
+                with_terminal_prompt(|| self.events.lock().unwrap().push("prompt shown"));
+            }
+            Ok(ActionRunResult::new(
+                self.name,
+                ActionRunStatus::CheckSucceeded,
+                None,
+                None,
+                None,
+            ))
+        }
+        fn required(&self) -> bool {
+            true
+        }
+        fn name(&self) -> String {
+            self.name.to_string()
+        }
+        fn description(&self) -> String {
+            self.name.to_string()
+        }
+        fn help_text(&self) -> Option<String> {
+            None
+        }
+        fn help_url(&self) -> Option<String> {
+            None
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_prompt_waits_for_other_command_without_deadlock() -> Result<()> {
+        let started = Arc::new(Notify::new());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let action = |name| TerminalAction {
+            name,
+            started: started.clone(),
+            events: events.clone(),
+        };
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring("command", vec![], vec![action("command")]),
+            make_group_action_requiring("prompt", vec![], vec![action("prompt")]),
+        ]);
+        let order = ["command", "prompt"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.map(str::to_string).to_vec(),
+            skipped_groups: BTreeSet::new(),
+            yolo: false,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            run_groups.execute_parallel(),
+        )
+        .await??;
+        assert!(result.did_succeed);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["command finished", "prompt shown"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parallel_requires_multithread_runtime() {
+        let run_groups = RunGroups::<MockDoctorActionRun> {
+            graph: RunGraph::new(&[], &BTreeMap::new()),
+            group_actions: BTreeMap::new(),
+            full_order: Vec::new(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let error = run_groups.execute_parallel().await.unwrap_err();
+        assert!(error.to_string().contains("multi-thread Tokio runtime"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_independent_groups_overlap_but_child_waits() -> Result<()> {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let action = |name| TimedAction {
+            name,
+            active: active.clone(),
+            peak: peak.clone(),
+            events: Some(events.clone()),
+            status: ActionRunStatus::CheckSucceeded,
+            required: true,
+            delay_ms: 40,
+            should_run: true,
+            fail_with_error: false,
+            panic_after_delay: false,
+        };
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring("a", vec![], vec![action("a")]),
+            make_group_action_requiring("b", vec![], vec![action("b")]),
+            make_group_action_requiring("child", vec!["a", "b"], vec![action("child")]),
+        ]);
+        let order = ["a", "b", "child"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.iter().map(|name| name.to_string()).collect(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let result = run_groups.execute_parallel().await?;
+        assert!(result.did_succeed);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(result.group_reports.len(), 3);
+        let events = events.lock().unwrap();
+        let child_start = events
+            .iter()
+            .position(|event| event == "child started")
+            .unwrap();
+        assert!(events[..child_start].contains(&"a finished".to_string()));
+        assert!(events[..child_start].contains(&"b finished".to_string()));
+        assert_eq!(
+            result
+                .group_reports
+                .iter()
+                .map(GroupReport::group_name)
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "child"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_diamond_runs_shared_group_once_and_orders_actions() -> Result<()> {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let action = |name| TimedAction {
+            name,
+            active: active.clone(),
+            peak: peak.clone(),
+            events: Some(events.clone()),
+            status: ActionRunStatus::CheckSucceeded,
+            required: true,
+            delay_ms: 10,
+            should_run: true,
+            fail_with_error: false,
+            panic_after_delay: false,
+        };
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring("shared", vec![], vec![action("shared")]),
+            make_group_action_requiring("left", vec!["shared"], vec![action("left")]),
+            make_group_action_requiring("right", vec!["shared"], vec![action("right")]),
+            make_group_action_requiring(
+                "root",
+                vec!["left", "right"],
+                vec![action("root first"), action("root second")],
+            ),
+        ]);
+        let order = ["shared", "left", "right", "root"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.map(str::to_string).to_vec(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let result = run_groups.execute_parallel().await?;
+        assert!(result.did_succeed);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.as_str() == "shared started")
+                .count(),
+            1
+        );
+        let position = |event: &str| {
+            events
+                .iter()
+                .position(|item| item.as_str() == event)
+                .unwrap()
+        };
+        assert!(position("shared finished") < position("left started"));
+        assert!(position("shared finished") < position("right started"));
+        assert!(position("left finished") < position("root first started"));
+        assert!(position("right finished") < position("root first started"));
+        assert!(position("root first finished") < position("root second started"));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_exclusive_resource_serializes_groups() -> Result<()> {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let action = |name| TimedAction {
+            name,
+            active: active.clone(),
+            peak: peak.clone(),
+            events: None,
+            status: ActionRunStatus::CheckSucceeded,
+            required: true,
+            delay_ms: 40,
+            should_run: true,
+            fail_with_error: false,
+            panic_after_delay: false,
+        };
+        let mut group_actions = BTreeMap::from([
+            make_group_action_requiring("a", vec![], vec![action("a")]),
+            make_group_action_requiring("b", vec![], vec![action("b")]),
+        ]);
+        for container in group_actions.values_mut() {
+            container.group.exclusive_resources = vec!["homebrew".to_string()];
+        }
+        let order = ["a", "b"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.iter().map(|name| name.to_string()).collect(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let result = run_groups.execute_parallel().await?;
+        assert!(result.did_succeed);
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_optional_failure_blocks_dependent_and_drains_independent() -> Result<()> {
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring(
+                "failed",
+                vec![],
+                vec![make_action_run(
+                    ActionRunStatus::CheckFailedFixSucceedVerifyFailed,
+                    false,
+                )],
+            ),
+            make_group_action_requiring(
+                "independent",
+                vec![],
+                make_action_runs(ActionRunStatus::CheckSucceeded),
+            ),
+            make_group_action_requiring("child", vec!["failed"], will_not_run()),
+        ]);
+        let order = ["failed", "independent", "child"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.iter().map(|name| name.to_string()).collect(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let result = run_groups.execute_parallel().await?;
+        assert!(!result.did_succeed);
+        assert_eq!(result.failed_group, BTreeSet::from(["failed".to_string()]));
+        assert_eq!(
+            result.succeeded_groups,
+            BTreeSet::from(["independent".to_string()])
+        );
+        assert!(result.skipped_group.contains("child"));
+        assert_eq!(result.group_reports.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_fail_fast_drains_running_and_does_not_start_queued() -> Result<()> {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let action = |name, status, delay_ms, should_run| TimedAction {
+            name,
+            active: active.clone(),
+            peak: peak.clone(),
+            events: None,
+            status,
+            required: true,
+            delay_ms,
+            should_run,
+            fail_with_error: false,
+            panic_after_delay: false,
+        };
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring(
+                "failed",
+                vec![],
+                vec![action(
+                    "failed",
+                    ActionRunStatus::CheckFailedFixFailedStop,
+                    10,
+                    true,
+                )],
+            ),
+            make_group_action_requiring(
+                "running",
+                vec![],
+                vec![action("running", ActionRunStatus::CheckSucceeded, 40, true)],
+            ),
+            make_group_action_requiring(
+                "queued",
+                vec![],
+                vec![action("queued", ActionRunStatus::CheckSucceeded, 0, false)],
+            ),
+        ]);
+        let order = ["failed", "running", "queued"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.map(str::to_string).to_vec(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let result = run_groups.execute_parallel().await?;
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert!(result.succeeded_groups.contains("running"));
+        assert!(result.failed_group.contains("failed"));
+        assert!(result.skipped_group.contains("queued"));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_action_error_drains_running_group() -> Result<()> {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let action = |name, delay_ms, fail_with_error| TimedAction {
+            name,
+            active: active.clone(),
+            peak: peak.clone(),
+            events: Some(events.clone()),
+            status: ActionRunStatus::CheckSucceeded,
+            required: true,
+            delay_ms,
+            should_run: true,
+            fail_with_error,
+            panic_after_delay: false,
+        };
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring("error", vec![], vec![action("error", 10, true)]),
+            make_group_action_requiring("running", vec![], vec![action("running", 40, false)]),
+        ]);
+        let order = ["error", "running"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.map(str::to_string).to_vec(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let error = run_groups.execute_parallel().await.unwrap_err();
+        assert!(error.to_string().contains("error action error"));
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .contains(&"running finished".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_action_panic_drains_running_group() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let action = |name, delay_ms, panic_after_delay| TimedAction {
+            name,
+            active: active.clone(),
+            peak: peak.clone(),
+            events: Some(events.clone()),
+            status: ActionRunStatus::CheckSucceeded,
+            required: true,
+            delay_ms,
+            should_run: true,
+            fail_with_error: false,
+            panic_after_delay,
+        };
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring("panic", vec![], vec![action("panic", 10, true)]),
+            make_group_action_requiring("running", vec![], vec![action("running", 40, false)]),
+        ]);
+        let order = ["panic", "running"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.map(str::to_string).to_vec(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        assert!(run_groups.execute_parallel().await.is_err());
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .contains(&"running finished".to_string())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_parallel_run_aborts_running_group() -> Result<()> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let group_actions = BTreeMap::from([make_group_action_requiring(
+            "long",
+            vec![],
+            vec![TimedAction {
+                name: "long",
+                active: Arc::new(AtomicUsize::new(0)),
+                peak: Arc::new(AtomicUsize::new(0)),
+                events: Some(events.clone()),
+                status: ActionRunStatus::CheckSucceeded,
+                required: true,
+                delay_ms: 100,
+                should_run: true,
+                fail_with_error: false,
+                panic_after_delay: false,
+            }],
+        )]);
+        let order = ["long"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.map(str::to_string).to_vec(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let run = tokio::spawn(run_groups.execute_parallel());
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !events.lock().unwrap().contains(&"long started".to_string()) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await?;
+        run.abort();
+        assert!(run.await.unwrap_err().is_cancelled());
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .contains(&"long finished".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_user_denied_prerequisite_blocks_child() -> Result<()> {
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring(
+                "denied",
+                vec![],
+                make_action_runs(ActionRunStatus::CheckFailedFixUserDenied),
+            ),
+            make_group_action_requiring("child", vec!["denied"], will_not_run()),
+        ]);
+        let order = ["denied", "child"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.map(str::to_string).to_vec(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let result = run_groups.execute_parallel().await?;
+        assert!(!result.did_succeed);
+        assert_eq!(
+            result.skipped_group,
+            BTreeSet::from(["denied".to_string(), "child".to_string()])
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_fix_false_failure_blocks_dependent_check() -> Result<()> {
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring(
+                "unresolved",
+                vec![],
+                make_action_runs(ActionRunStatus::CheckFailedNoRunFix),
+            ),
+            make_group_action_requiring("child", vec!["unresolved"], will_not_run()),
+        ]);
+        let order = ["unresolved", "child"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.map(str::to_string).to_vec(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let result = run_groups.execute_parallel().await?;
+        assert!(!result.did_succeed);
+        assert!(result.failed_group.contains("unresolved"));
+        assert!(result.skipped_group.contains("child"));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_cycle_fails_instead_of_silently_dropping_groups() -> Result<()> {
+        let group_actions = BTreeMap::from([
+            make_group_action_requiring("a", vec!["b"], will_not_run()),
+            make_group_action_requiring("b", vec!["a"], will_not_run()),
+            make_group_action_requiring("unrelated", vec![], will_not_run()),
+        ]);
+        let order = ["unrelated", "a", "b"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: order.iter().map(|name| name.to_string()).collect(),
+            skipped_groups: BTreeSet::new(),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let error = run_groups.execute_parallel().await.unwrap_err();
+        assert!(error.to_string().contains("cyclic or unsatisfied"));
+        assert!(
+            error.to_string().contains("involving a") || error.to_string().contains("involving b")
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_planned_skip_does_not_block_consumer() -> Result<()> {
+        let group_actions = BTreeMap::from([make_group_action_requiring(
+            "consumer",
+            vec!["conditional"],
+            make_action_runs(ActionRunStatus::CheckSucceeded),
+        )]);
+        let order = ["consumer"];
+        let run_groups = RunGroups {
+            graph: graph_from(&order, &group_actions),
+            group_actions,
+            full_order: ["conditional", "consumer"].map(str::to_string).to_vec(),
+            skipped_groups: BTreeSet::from(["conditional".to_string()]),
+            yolo: true,
+        };
+        let _serialize = SPAN_CALLSITE_LOCK.lock().await;
+        let result = run_groups.execute_parallel().await?;
+        assert!(result.did_succeed);
+        assert!(result.succeeded_groups.contains("consumer"));
+        assert!(result.skipped_group.contains("conditional"));
+        Ok(())
     }
 
     #[tokio::test]

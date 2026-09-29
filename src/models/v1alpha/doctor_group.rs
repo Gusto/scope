@@ -107,6 +107,10 @@ pub struct DoctorGroupSpec {
     #[serde(default)]
     pub needs: Vec<String>,
 
+    /// Resources that this group must hold exclusively while its actions run.
+    #[serde(default)]
+    pub exclusive_resources: Vec<String>,
+
     /// A series of steps to check and fix for the group.
     pub actions: Vec<DoctorGroupActionSpec>,
 

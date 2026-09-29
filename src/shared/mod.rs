@@ -6,6 +6,9 @@ use std::cmp::max;
 use std::path::Path;
 
 mod capture;
+#[cfg(test)]
+pub(crate) use capture::TERMINAL_ACCESS;
+pub(crate) use capture::with_terminal_prompt;
 mod config_load;
 mod logging;
 
