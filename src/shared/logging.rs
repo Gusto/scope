@@ -16,10 +16,10 @@ use opentelemetry_sdk::{
 use tonic::metadata::MetadataMap;
 use url::Url;
 
+use crate::shared::directories;
 use std::env;
 use std::fs::File;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -149,8 +149,9 @@ pub struct ConfiguredLogger {
     /// needed to drop otel and finish the last write later
     _otel: Option<OtelProperties>,
     /// needed to keep the logger running
-    _guard: tracing_appender::non_blocking::WorkerGuard,
-    pub log_location: String,
+    _guard: Option<tracing_appender::non_blocking::WorkerGuard>,
+    /// Location of the log file, if file logging was successfully configured
+    pub log_location: Option<String>,
 }
 
 /// RAII wrapper that ensures metrics and traces are flushed on shutdown
@@ -316,26 +317,47 @@ impl LoggingOpts {
         metadata_map
     }
 
+    fn create_log_writer(
+        file_name: &str,
+    ) -> anyhow::Result<(
+        tracing_appender::non_blocking::NonBlocking,
+        tracing_appender::non_blocking::WorkerGuard,
+        String,
+    )> {
+        let log_dir = directories::state()
+            .map(|state_dir| state_dir.join("scope"))
+            .ok_or_else(|| anyhow::anyhow!("unable to determine the user's state directory"))?;
+        std::fs::create_dir_all(&log_dir)?;
+        let file_path = log_dir.join(file_name);
+        let file = File::create(&file_path)?;
+        let (non_blocking, guard) =
+            tracing_appender::non_blocking(strip_ansi_escapes::Writer::new(file));
+        Ok((non_blocking, guard, file_path.display().to_string()))
+    }
+
     pub async fn configure_logging(&self, run_id: &str, prefix: &str) -> ConfiguredLogger {
         let file_name = format!("scope-{prefix}-{run_id}.log");
-        let full_file_name = format!("/tmp/scope/{file_name}");
-        std::fs::create_dir_all("/tmp/scope").expect("to be able to create tmp dir");
 
         let otel_props = self.setup_otel(run_id).unwrap_or_else(|e| {
             println!("opentelemetry configuration failed. Events will not be sent. {e:?}");
             None
         });
 
-        let file_path = PathBuf::from(&full_file_name);
-        let (non_blocking, guard) =
-            tracing_appender::non_blocking(strip_ansi_escapes::Writer::new(
-                File::create(file_path).expect("to be able to create log file"),
-            ));
-
-        let file_output = tracing_subscriber::fmt::layer()
-            .event_format(Format::default().pretty())
-            .with_ansi(false)
-            .with_writer(non_blocking);
+        let (file_output, guard, log_location) = match Self::create_log_writer(&file_name) {
+            Ok((non_blocking, guard, full_file_name)) => {
+                let file_output = tracing_subscriber::fmt::layer()
+                    .event_format(Format::default().pretty())
+                    .with_ansi(false)
+                    .with_writer(non_blocking);
+                (Some(file_output), Some(guard), Some(full_file_name))
+            }
+            Err(e) => {
+                println!(
+                    "Unable to create log file {file_name}. File logging will be disabled. {e:?}"
+                );
+                (None, None, None)
+            }
+        };
 
         let indicatif_layer = IndicatifLayer::new()
             .with_span_field_formatter(hide_indicatif_span_fields(DefaultFields::new()))
@@ -411,7 +433,7 @@ impl LoggingOpts {
 
         ConfiguredLogger {
             _guard: guard,
-            log_location: full_file_name,
+            log_location,
             _otel: otel_props,
         }
     }
