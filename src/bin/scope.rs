@@ -75,8 +75,10 @@ async fn main() {
         .await;
     let error_code = run_subcommand(opts).await;
 
-    if error_code != 0 || enabled!(Level::DEBUG) {
-        info!(target: "user", "More detailed logs at {}", configured_logger.log_location);
+    if let Some(log_location) = &configured_logger.log_location
+        && (error_code != 0 || enabled!(Level::DEBUG))
+    {
+        info!(target: "user", "More detailed logs at {}", log_location);
     }
 
     drop(configured_logger);

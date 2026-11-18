@@ -98,6 +98,42 @@ pub fn cache() -> Option<PathBuf> {
     }
 }
 
+/// Get the user's state directory.
+///
+/// Returns the state directory following the XDG Base Directory Specification:
+/// - `$XDG_STATE_HOME` if set, otherwise `~/.local/state`
+///
+/// The state directory holds data that should persist between (re)starts but
+/// is not important or portable enough to be stored in the data directory,
+/// e.g. logs and history.
+///
+/// # Returns
+///
+/// Returns `Some(PathBuf)` if the state directory can be determined,
+/// `None` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// # use dev_scope::shared::directories::state;
+/// if let Some(state_dir) = state() {
+///     println!("State directory: {}", state_dir.display());
+/// }
+/// ```
+pub fn state() -> Option<PathBuf> {
+    if let Some(home) = home() {
+        // Use XDG Base Directory Specification
+        // Check for XDG_STATE_HOME first, fallback to ~/.local/state
+        if let Ok(xdg_state) = std::env::var("XDG_STATE_HOME") {
+            Some(PathBuf::from(xdg_state))
+        } else {
+            Some(home.join(".local").join("state"))
+        }
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +286,48 @@ mod tests {
             let cache1 = cache();
             let cache2 = cache();
             assert_eq!(cache1, cache2, "cache should return consistent results");
+        }
+    }
+
+    mod state {
+        use super::*;
+
+        #[test]
+        fn xdg_state_home_unset() {
+            let _guard = EnvGuard::new("XDG_STATE_HOME");
+            _guard.remove();
+
+            let state_dir = state().unwrap();
+            let path_str = state_dir.to_string_lossy();
+            assert!(
+                path_str.ends_with("/.local/state"),
+                "State directory should end with '/.local/state', got: {path_str}"
+            );
+        }
+
+        #[test]
+        fn xdg_state_home_set() {
+            let _guard = EnvGuard::new("XDG_STATE_HOME");
+            let test_xdg_path = "/tmp/test_xdg_state";
+            _guard.set(test_xdg_path);
+
+            let state_dir = state().unwrap();
+            assert_eq!(
+                state_dir,
+                PathBuf::from(test_xdg_path),
+                "Should use XDG_STATE_HOME when set"
+            );
+        }
+
+        #[test]
+        fn consistency() {
+            let _guard = EnvGuard::new("XDG_STATE_HOME");
+            _guard.remove();
+
+            // Test that multiple calls return the same result
+            let state1 = state();
+            let state2 = state();
+            assert_eq!(state1, state2, "state should return consistent results");
         }
     }
 }

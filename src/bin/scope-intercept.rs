@@ -63,8 +63,10 @@ async fn main() -> anyhow::Result<()> {
         1
     });
 
-    if exit_code != 0 || enabled!(Level::DEBUG) {
-        info!(target: "user", "More detailed logs at {}", configured_logger.log_location);
+    if let Some(log_location) = &configured_logger.log_location
+        && (exit_code != 0 || enabled!(Level::DEBUG))
+    {
+        info!(target: "user", "More detailed logs at {}", log_location);
     }
 
     drop(configured_logger);
