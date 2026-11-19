@@ -227,8 +227,12 @@ async fn load_all_config(working_dir: &Path, paths: &Vec<PathBuf>) -> Vec<ModelR
             Ok(content) => content,
         };
         for doc in Deserializer::from_str(&file_contents) {
-            if let Some(parsed_model) = parse_model(doc, working_dir, &file_path) {
-                loaded_values.push(parsed_model)
+            match parse_model(doc, working_dir, &file_path) {
+                Ok(Some(parsed_model)) => loaded_values.push(parsed_model),
+                Ok(None) => {}
+                // The document iterator does not advance past a document that is not
+                // valid YAML, so carrying on would report the same error forever.
+                Err(_) => break,
             }
         }
     }
@@ -236,18 +240,17 @@ async fn load_all_config(working_dir: &Path, paths: &Vec<PathBuf>) -> Vec<ModelR
     loaded_values
 }
 
+/// Reads one document as a model. `Ok(None)` means the document is valid YAML but not a
+/// model scope understands; the caller can carry on with the next document. `Err` means the
+/// document is not valid YAML, and the caller must stop reading this file.
 pub(crate) fn parse_model(
     doc: Deserializer,
     working_dir: &Path,
     file_path: &Path,
-) -> Option<ModelRoot<Value>> {
-    let value = match Value::deserialize(doc) {
-        Ok(value) => value,
-        Err(e) => {
-            warn!(target: "user", "Unable to load document from {} because {}", file_path.display(), e);
-            return None;
-        }
-    };
+) -> Result<Option<ModelRoot<Value>>, serde_yaml::Error> {
+    let value = Value::deserialize(doc).inspect_err(|e| {
+        warn!(target: "user", "Unable to load document from {} because {}", file_path.display(), e);
+    })?;
 
     match serde_yaml::from_value::<ModelRoot<Value>>(value) {
         Ok(mut value) => {
@@ -259,11 +262,11 @@ pub(crate) fn parse_model(
             value.metadata.annotations.bin_path = Some(build_exec_path(file_path));
 
             value.metadata.annotations.working_dir = Some(working_dir.display().to_string());
-            Some(value)
+            Ok(Some(value))
         }
         Err(e) => {
             warn!(target: "user", "Unable to parse model from {} because {}", file_path.display(), e);
-            None
+            Ok(None)
         }
     }
 }
@@ -508,5 +511,61 @@ mod tests {
     fn test_build_config_path_nonexistent_directory() {
         let nonexistent_path = Path::new("/this/path/does/not/exist/hopefully");
         build_config_path(nonexistent_path);
+    }
+
+    fn known_error(name: &str) -> String {
+        format!(
+            "apiVersion: scope.github.com/v1alpha\nkind: ScopeKnownError\nmetadata:\n  name: {name}\nspec:\n  pattern: foo\n  help: bar\n"
+        )
+    }
+
+    const SYNTAX_ERROR: &str =
+        "apiVersion: scope.github.com/v1alpha\nmetadata:\n  oops: [unclosed\n";
+
+    /// Loads `dir` on its own thread, so a return of the endless loop fails the test
+    /// after a few seconds instead of hanging the whole suite.
+    fn load_names(dir: &Path) -> Vec<String> {
+        let dir = dir.to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let loaded = runtime.block_on(load_all_config(&dir, &vec![dir.clone()]));
+            let mut names: Vec<String> = loaded.into_iter().map(|m| m.metadata.name).collect();
+            names.sort();
+            let _ = tx.send(names);
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("load_all_config did not return; it is stuck on a YAML syntax error")
+    }
+
+    #[test]
+    fn test_load_all_config_survives_a_file_with_a_yaml_syntax_error() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.yaml"), known_error("a")).unwrap();
+        fs::write(dir.path().join("b.yaml"), SYNTAX_ERROR).unwrap();
+        fs::write(dir.path().join("c.yaml"), known_error("c")).unwrap();
+
+        assert_eq!(load_names(dir.path()), ["a", "c"]);
+    }
+
+    #[test]
+    fn test_load_all_config_keeps_documents_before_a_yaml_syntax_error() {
+        let dir = tempdir().unwrap();
+        let contents = format!("{}---\n{}", known_error("one"), SYNTAX_ERROR);
+        fs::write(dir.path().join("a.yaml"), contents).unwrap();
+
+        assert_eq!(load_names(dir.path()), ["one"]);
+    }
+
+    #[test]
+    fn test_load_all_config_continues_past_a_document_that_is_not_a_model() {
+        let dir = tempdir().unwrap();
+        let not_a_model = "apiVersion: scope.github.com/v1alpha\nkind: ScopeKnownError\nmetadata:\n  name: no-spec\n";
+        let contents = format!("{not_a_model}---\n{}", known_error("two"));
+        fs::write(dir.path().join("a.yaml"), contents).unwrap();
+
+        assert_eq!(load_names(dir.path()), ["two"]);
     }
 }
