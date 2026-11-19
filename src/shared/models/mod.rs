@@ -14,10 +14,10 @@ pub(crate) fn parse_models_from_string(
 
     let mut models = Vec::new();
     for doc in Deserializer::from_str(input) {
-        if let Some(parsed_model) =
-            crate::shared::config_load::parse_model(doc, working_dir, file_path)
-        {
-            models.push(parsed_model.try_into()?)
+        match crate::shared::config_load::parse_model(doc, working_dir, file_path) {
+            Ok(Some(parsed_model)) => models.push(parsed_model.try_into()?),
+            Ok(None) => {}
+            Err(_) => break,
         }
     }
 
