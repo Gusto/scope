@@ -175,7 +175,7 @@
       ]
     },
     "DoctorGroupSpec": {
-      "description": "Often used to describe how to fix a \"system\", like `ruby`, `python`, or databases. Able to\ndepend on other \"system\".",
+      "description": "Often used to describe how to fix a \"system\", like `ruby`, `python`, or databases. Able to\ndepend on other \"systems\".",
       "type": "object",
       "properties": {
         "actions": {
@@ -218,7 +218,7 @@
       ]
     },
     "DoctorInclude": {
-      "description": "Configure how a groups will be used when determining the task graph.",
+      "description": "Configure how groups will be used when determining the task graph.",
       "oneOf": [
         {
           "description": "Default option, the group will be included by default when determining which groups should\nrun.",

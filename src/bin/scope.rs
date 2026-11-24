@@ -41,7 +41,7 @@ enum Command {
     /// Run checks that will "checkup" your machine.
     #[clap(alias("d"))]
     Doctor(DoctorArgs),
-    /// Generate a bug report based from a command that was ran
+    /// Generate a bug report based on a command that was run
     #[clap(alias("r"))]
     Report(ReportArgs),
     /// Analyze for known errors.

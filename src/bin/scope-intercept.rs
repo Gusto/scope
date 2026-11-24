@@ -35,7 +35,7 @@ struct Cli {
     #[arg(long, short = 'y', default_value = "false")]
     yolo: bool,
 
-    /// Command to execute withing scope-intercept.
+    /// Command to execute within scope-intercept.
     #[arg(required = true)]
     utility: String,
 

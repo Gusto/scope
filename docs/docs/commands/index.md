@@ -6,7 +6,7 @@ sidebar_position: 2
 
 `scope` has several built-in commands that most engineers will use:
 - [`doctor`](doctor.md) - Run checks that will "checkup" your machine
-- [`report`](report.md) - Generate a bug report based from a command
+- [`report`](report.md) - Generate a bug report based on a command
 - [`analyze`](analyze/index.md) - Analyze configuration and print validation messages
 
 Beyond the built-in command, scope will also run any binary prefixed with `scope-`.
@@ -35,7 +35,7 @@ Here is an example output of `scope list` run from the `examples/` directory.
  INFO - foo                 External sub-command, run `scope foo` for help
  INFO - intercept           External sub-command, run `scope intercept` for help
  INFO - list                List the found config files, and resources detected
- INFO - report              Generate a bug report based from a command that was ran
+ INFO - report              Generate a bug report based on a command that was run
  INFO - version             Print version info and exit
 
 ```

@@ -97,7 +97,7 @@ fn doctor_group_action_required_default() -> bool {
 }
 
 /// Often used to describe how to fix a "system", like `ruby`, `python`, or databases. Able to
-/// depend on other "system".
+/// depend on other "systems".
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(deny_unknown_fields)]
@@ -144,7 +144,7 @@ impl Default for SkipSpec {
     }
 }
 
-/// Configure how a groups will be used when determining the task graph.
+/// Configure how groups will be used when determining the task graph.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum DoctorInclude {
