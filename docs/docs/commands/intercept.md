@@ -34,7 +34,7 @@ Usage: scope-intercept [OPTIONS] <UTILITY> [ARGS]...
 
 Arguments:
   <UTILITY>
-          Command to execute withing scope-intercept
+          Command to execute within scope-intercept
 
   [ARGS]...
           Arguments to be passed to the utility
